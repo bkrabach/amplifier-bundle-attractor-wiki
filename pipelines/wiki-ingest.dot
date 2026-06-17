@@ -61,7 +61,17 @@ digraph WikiIngest {
         prompt="Reconcile the ENTIRE wiki (not just this source's pages) so it stays a single coherent knowledge base across ingests. Do ALL of:\n(1) DUPLICATES: find entity pages that are the same thing under different slugs OR share a title (e.g. an 'AIOS' page and an 'Agentic OS' page). MERGE each set into ONE canonical page — keep the richest / most-linked one, fold in the other's unique content and sources[], REPOINT every [[wikilink]] in the wiki to the canonical slug, DELETE the redundant file, and fix index.md.\n(2) ORPHANS: find entity pages with no inbound [[wikilink]] from any other page. Wire each into the spine with a real [[wikilink]] from a genuinely related page (or, if it is truly redundant, merge it away). Do not fabricate relationships.\n(3) Update index.md and append a one-line reconciliation note to log.md.\nThe hardened .wiki/scripts/verify.sh now FAILS on duplicate titles and on orphan entity pages, so leave NONE. End with a non-empty one-line summary of merges/heals (or 'no reconciliation needed')."
     ]
 
-    // Step 6 — Verify again under the hardened gate (catches dup-titles + orphans).
+    // Step 6 — Provenance + status audit (LLM): the SEMANTIC check verify.sh CANNOT be.
+    // The independent A/B panel converged on one miss — the pipeline over-claims:
+    // it stamps 'settled' on still-evolving entities and asserts specifics its cited
+    // sources don't actually carry (the human reviewer's doubt, deleted). This node
+    // restores that doubt: downgrade unsupported 'settled' claims, never promote.
+    provenance_audit [
+        llm_provider="anthropic",
+        prompt="Audit the WHOLE wiki for provenance + status honesty — the judgment a human reviewer supplies, which no script can. For EVERY entity page, with special scrutiny on status: settled pages:\n(1) Open the source pages it cites (sources[] frontmatter + any [[sources/...]] links) and READ them.\n(2) For each load-bearing claim on the page, confirm the cited sources actually contain it. The schema rule: every claim traces to a source, and status is LOAD-BEARING — settled = locked/verified, working = live/still-evolving, unsettled = open.\n(3) Where a 'settled' page asserts specifics its cited sources do NOT support: DOWNGRADE status: settled -> working AND add a line '> TODO-VERIFY: <claim> — not found in cited sources'; or move a genuinely-open assertion into open-questions.md. An analogy, a forward-looking projection, or a still-maturing outcome should be 'working', not 'settled'.\n(4) Be conservative and surgical: only downgrade/flag claims that genuinely lack source support; do NOT delete real content, do NOT invent doubt where the source backs the claim, and NEVER promote anything upward.\n(5) Append a one-line note to log.md naming what you downgraded/flagged (or 'provenance: all settled claims trace to cited sources').\nEnd with a non-empty one-line summary."
+    ]
+
+    // Step 7 — Verify again under the hardened gate (catches dup-titles + orphans).
     verify2 [
         shape=parallelogram,
         tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-verify2.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-verify2.out && printf clean || printf dirty"
@@ -82,7 +92,8 @@ digraph WikiIngest {
     verify -> verify_gate
     verify_gate -> reconcile   [condition="context.tool.last_line=clean", weight=10]
     verify_gate -> write_pages [condition="context.tool.last_line=dirty", weight=5]
-    reconcile -> verify2
+    reconcile -> provenance_audit
+    provenance_audit -> verify2
     verify2 -> verify2_gate
     verify2_gate -> archive    [condition="context.tool.last_line=clean", weight=10]
     verify2_gate -> reconcile  [condition="context.tool.last_line=dirty", weight=5]
