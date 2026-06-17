@@ -40,10 +40,11 @@ digraph WikiIngest {
     ]
 
     // Step 3 — Apply the plan (LLM): create/edit pages, update index + log, cite.
+    // No goal_gate here: the deterministic verify.sh loop below IS the real gate
+    // (verify -> verify_gate -> write_pages on 'dirty'), which is more trustworthy
+    // than an LLM goal-judge and removes a redundant failure surface.
     write_pages [
         llm_provider="anthropic",
-        goal_gate=true,
-        retry_target="write_pages",
         prompt="Apply .wiki/ingest-plan.md against the wiki package: create/edit each page following the schema's frontmatter + body conventions, wire [[wikilinks]] and sources[], update index.md, and append one line to log.md. Cite every claim to a source page. Honor the status discipline (settled / working / unsettled; proposals are NOT decisions; never fabricate). End with a non-empty one-line summary of what changed."
     ]
 
