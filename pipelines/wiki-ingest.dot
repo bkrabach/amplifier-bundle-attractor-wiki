@@ -61,17 +61,30 @@ digraph WikiIngest {
         prompt="Reconcile the ENTIRE wiki (not just this source's pages) so it stays a single coherent knowledge base across ingests. Do ALL of:\n(1) DUPLICATES: find entity pages that are the same thing under different slugs OR share a title (e.g. an 'AIOS' page and an 'Agentic OS' page). MERGE each set into ONE canonical page — keep the richest / most-linked one, fold in the other's unique content and sources[], REPOINT every [[wikilink]] in the wiki to the canonical slug, DELETE the redundant file, and fix index.md.\n(2) ORPHANS: find entity pages with no inbound [[wikilink]] from any other page. Wire each into the spine with a real [[wikilink]] from a genuinely related page (or, if it is truly redundant, merge it away). Do not fabricate relationships.\n(3) Update index.md and append a one-line reconciliation note to log.md.\nThe hardened .wiki/scripts/verify.sh now FAILS on duplicate titles and on orphan entity pages, so leave NONE. End with a non-empty one-line summary of merges/heals (or 'no reconciliation needed')."
     ]
 
-    // Step 6 — Provenance + status audit (LLM): the SEMANTIC check verify.sh CANNOT be.
-    // The independent A/B panel converged on one miss — the pipeline over-claims:
-    // it stamps 'settled' on still-evolving entities and asserts specifics its cited
-    // sources don't actually carry (the human reviewer's doubt, deleted). This node
-    // restores that doubt: downgrade unsupported 'settled' claims, never promote.
+    // Step 6 — Provenance + status audit (LLM), RAW-AWARE (Lever A diagnosis): the
+    // SEMANTIC check verify.sh CANNOT be. The A/B panel found the pipeline over-claims;
+    // Lever A then found the *flags themselves* conflate two distinct defects — a claim
+    // that IS in the RAW input but was dropped from the lossy sources/ summary (NOT an
+    // over-claim — heal the summary) vs a claim in NEITHER (a TRUE over-claim — flag it).
+    // This node reads BOTH the summarized source page AND the raw input and routes three
+    // ways, collapsing the lossy-summary artifact instead of mis-flagging it as doubt.
     provenance_audit [
         llm_provider="anthropic",
-        prompt="Audit the WHOLE wiki for provenance + status honesty — the judgment a human reviewer supplies, which no script can. For EVERY entity page, audited UNIFORMLY (the same rigor on a quiet concept page as on the spine outcomes — the prior panel found unflagged claims hiding on low-traffic pages):\n(1) Open the source pages it cites (sources[] frontmatter + any [[sources/...]] links) and READ them.\n(2) For each load-bearing claim on the page, confirm the cited sources actually contain it. The schema rule: every claim traces to a source, and status is LOAD-BEARING — settled = locked/verified, working = live/still-evolving, unsettled = open.\n(3) Flag EVERY unsupported specific on EVERY entity page regardless of status: wherever a page (settled OR working, high-traffic OR obscure) asserts a claim its cited sources do NOT contain, add a line '> TODO-VERIFY: <claim> — not found in cited sources' right at that claim. Apply this UNIFORMLY — do not let quiet pages off the hook. ADDITIONALLY, if such a page is status: settled, DOWNGRADE it to working (an analogy, a forward-looking projection, or a still-maturing outcome should be 'working', not 'settled'); or move a genuinely-open assertion into open-questions.md.\n(4) Be conservative and surgical: only downgrade/flag claims that genuinely lack source support; do NOT delete real content, do NOT invent doubt where the source backs the claim, and NEVER promote anything upward.\n(5) Append a one-line note to log.md naming what you downgraded/flagged (or 'provenance: all settled claims trace to cited sources').\nEnd with a non-empty one-line summary."
+        prompt="Audit the WHOLE wiki for provenance + status honesty, RAW-AWARE. For EVERY entity page, audited UNIFORMLY (same rigor on a quiet concept page as on the spine outcomes — quiet pages hide unflagged claims):\n(1) Identify each source the page cites (sources[] frontmatter + any [[sources/...]] links). For EACH cited source open TWO things and READ both: (a) the summarized source PAGE at team-knowledge/sources/<slug>.md, and (b) the RAW input it summarizes. The raw filename is recorded on the source page's provenance; find it under raw/ (the current-ingest source) OR raw/archive/ (previously-ingested sources). If you cannot locate the raw file, note it and treat raw as unavailable for that claim.\n(2) For each load-bearing claim on the entity page, classify it THREE ways against (a) the source page and (b) the raw input:\n   - IN THE RAW BUT MISSING FROM THE SOURCE PAGE → the summary is lossy; this is NOT an over-claim. HEAL the source page: add the supporting quote/detail from the raw input to team-knowledge/sources/<slug>.md so the evidence chain is complete. Do NOT add a TODO-VERIFY to the entity page.\n   - IN NEITHER the source page NOR the raw input → a TRUE over-claim. Add a line '> TODO-VERIFY: <claim> — not found in cited source or raw input' right at that claim; and if the page is status: settled, DOWNGRADE it to working (an analogy / forward-looking projection / still-maturing outcome should be 'working'), or move a genuinely-open assertion into open-questions.md.\n   - IN EITHER the source page OR the raw → fine, leave it.\n(3) Apply this UNIFORMLY across high- and low-traffic pages. Be conservative and surgical: never delete real content, never invent doubt where the raw OR the source backs the claim, NEVER promote upward.\n(4) Append a one-line note to log.md naming what you healed vs flagged (e.g. 'provenance: healed 2 source pages from raw, flagged 3 true over-claims').\nEnd with a non-empty one-line summary."
     ]
 
-    // Step 7 — Verify again under the hardened gate (catches dup-titles + orphans).
+    // Step 7 — Second reviewer (LLM): AUTOMATED adjudication BEFORE any human, fully
+    // non-blocking (NO hexagon — the ingest flow never pauses). Re-reviews every flag the
+    // audit wrote by reading FILES ON DISK (NOT prior-node context, which is truncated to
+    // 200 chars), CONFIRMS / CORRECTS over-cautious flags / leaves the rest, and emits the
+    // genuinely-uncertain residue to a clear queue: team-knowledge/flag-queue.json. The
+    // separate wiki-review.dot HITL pipeline consumes that queue with a human in the loop.
+    review [
+        llm_provider="anthropic",
+        prompt="You are an INDEPENDENT second reviewer — the automated adjudication pass BEFORE any human. Work ONLY from FILES on disk (do NOT rely on prior-node context). Steps:\n(1) Find every '> TODO-VERIFY:' line the audit added across entity pages: grep -rn '> TODO-VERIFY:' team-knowledge.\n(2) For EACH flag, RE-VERIFY it yourself: open the page, identify the flagged claim, then open the page's cited source PAGE (team-knowledge/sources/<slug>.md) AND the RAW input (raw/<file> or raw/archive/<file>). Decide one of:\n   - CONFIRM: the claim genuinely lacks support in BOTH the source page and the raw → KEEP the TODO-VERIFY line.\n   - CORRECT: the flag is wrong / over-cautious — the claim IS supported by the source page or the raw input → REMOVE that exact '> TODO-VERIFY:' line from the page. (Leave status as-is unless a settled→working downgrade was caused SOLELY by this now-removed flag and the claim is clearly settled-grade.) Briefly note why.\n   - UNCERTAIN: you cannot conclusively decide from the files → KEEP the flag and record it for a human.\n(3) Write EVERY flag still standing after your CORRECT removals (CONFIRM + UNCERTAIN) to team-knowledge/flag-queue.json as a JSON ARRAY; each element exactly: {\"page\": \"<path under team-knowledge/>\", \"claim\": \"<flagged claim text>\", \"cited_source\": \"<source slug>\", \"raw_source\": \"<raw filename or null>\", \"reviewer_note\": \"<why this needs human eyes>\", \"status\": \"open\"}. If none remain, write []. ALWAYS create the file as valid JSON.\n(4) Append one line to log.md: 'review: confirmed X, corrected Y over-cautious flags, queued Z for human'.\nEnd with a non-empty one-line summary naming X, Y, Z."
+    ]
+
+    // Step 8 — Verify again under the hardened gate (catches dup-titles + orphans).
     verify2 [
         shape=parallelogram,
         tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-verify2.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-verify2.out && printf clean || printf dirty"
@@ -93,7 +106,8 @@ digraph WikiIngest {
     verify_gate -> reconcile   [condition="context.tool.last_line=clean", weight=10]
     verify_gate -> write_pages [condition="context.tool.last_line=dirty", weight=5]
     reconcile -> provenance_audit
-    provenance_audit -> verify2
+    provenance_audit -> review
+    review -> verify2
     verify2 -> verify2_gate
     verify2_gate -> archive    [condition="context.tool.last_line=clean", weight=10]
     verify2_gate -> reconcile  [condition="context.tool.last_line=dirty", weight=5]

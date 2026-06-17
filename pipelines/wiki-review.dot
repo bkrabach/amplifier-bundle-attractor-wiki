@@ -1,0 +1,83 @@
+// wiki-review.dot — the guided HITL pipeline that drains the flag-queue.json
+// produced by wiki-ingest.dot's non-blocking `review` node.
+//
+// This is the SEPARATE human-in-the-loop tool the design calls for: the ingest
+// pipeline runs fully headless and emits a clear verification queue; THIS pipeline
+// walks a human through that queue one flagged claim at a time, applies their
+// decision to the wiki, and marks each item resolved — so automation is never
+// blocked waiting on a human, yet nothing flagged is silently shipped.
+//
+// Node-type discipline:
+//   parallelogram = deterministic shell (review_queue.py) — the loop MECHANICS are
+//                   deterministic so the ONLY judgment in the graph is the human's.
+//   diamond       = pure router (queue empty? -> done).
+//   hexagon       = wait.human gate — the real HITL primitive. Choices come from the
+//                   outgoing edge labels ([C]/[X]/[P]); the human's selection routes
+//                   to the matching deterministic apply node. ConsoleInterviewer does
+//                   not render attachments, so the claim is surfaced INLINE in the
+//                   prompt via ${tool.output} (the `show` node cats it to stdout).
+//
+// $PYBIN and $HELPER are substituted to absolute paths by run_review.py before the
+// engine sees the graph (same mechanism wiki-ingest uses for $source).
+
+digraph WikiReview {
+    graph [
+        goal="Guide a human through the wiki flag-queue: confirm / correct / promote each flagged claim",
+        default_thread_id="wiki-review"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Pop the next status==open item -> review-current.{json,txt}; print ITEM/EMPTY.
+    next [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER next"
+    ]
+    has_more [shape=diamond]
+
+    // Surface the current item to the gate prompt (tool.output carries it forward).
+    show [
+        shape=parallelogram,
+        tool_command="cat .wiki/review-current.txt"
+    ]
+
+    // The human gate. One item at a time; three resolutions via edge labels.
+    gate [
+        shape=hexagon,
+        prompt="A wiki claim was flagged as unsupported by its cited source AND raw input (automated reviewer left it for you). Review it:\n\n${tool.output}\n\nHow do you want to resolve this flag?"
+    ]
+
+    // Deterministic appliers — the decision is encoded by WHICH node the gate routed to.
+    apply_confirm [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER apply confirm"
+    ]
+    apply_correct [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER apply correct"
+    ]
+    apply_promote [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER apply promote"
+    ]
+
+    start -> next
+    next -> has_more
+    has_more -> show [condition="context.tool.last_line=ITEM"]
+    has_more -> done [condition="context.tool.last_line=EMPTY"]
+    show -> gate
+
+    // Human gate routes by selection (suggested_next_ids from the chosen label).
+    // NOTE: the accelerator-key parser (_parse_accelerator_key) requires a SPACE after
+    // the bracket — "[C] Confirm" yields key "C"; "[C]onfirm" (glued) does NOT and falls
+    // back to the default choice. Keep the space so C/X/P route correctly.
+    gate -> apply_confirm [label="[C] Confirm — claim is genuinely unsupported, keep the flag"]
+    gate -> apply_correct [label="[X] Correct — the flag is wrong, remove it from the page"]
+    gate -> apply_promote [label="[P] Promote — claim is verified, drop the flag and mark settled"]
+
+    // Loop back to pull the next item.
+    apply_confirm -> next
+    apply_correct -> next
+    apply_promote -> next
+}
