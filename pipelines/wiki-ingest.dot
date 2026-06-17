@@ -9,12 +9,13 @@
 //   parallelogram = deterministic shell (route on EXIT CODE, never LLM text)
 //   box (default) = LLM agent node (judgment / content generation)
 //   diamond       = pure router
-// The verify_gate -> write_pages back-edge is the verify-until-clean V+R loop,
-// a direct translation of /wiki-ingest Step 5 ("both errors and warnings block").
 //
-// STATUS: drafted, NOT yet run end-to-end. Next: run against a throwaway COPY of
-// a seeded wiki (never the real one), prove a box node WRITES pages that pass
-// verify.sh, then A/B-judge its output vs the committed interactive baseline.
+// STATUS: write→verify loop PROVEN green end-to-end (mines a source, writes
+// interlinked pages, passes verify.sh). This revision adds a RECONCILE pass
+// (whole-wiki dedup-merge + orphan-heal) gated by the HARDENED verify.sh, to
+// close the A/B finding: headless single-source ingest filed the same entity
+// twice across runs (aios.md + agentic-os.md, one orphaned) because nothing did
+// the cross-ingest reconciliation a human diff-review supplies.
 
 digraph WikiIngest {
     graph [
@@ -36,27 +37,38 @@ digraph WikiIngest {
     // Step 2 — Mine the source (LLM): extract per schema, write a concrete ingest plan.
     mine [
         llm_provider="anthropic",
-        prompt="You are running /wiki-ingest as an automated pipeline (no interactive mode, no human in the loop). The load-bearing contract is .wiki/context/schema.md; your mounted orientation explains the pattern to read it through. Read raw/$source, mine it per the schema (entities, concepts, decisions, cross-refs), and WRITE a concrete ingest plan to .wiki/ingest-plan.md naming every page to create or update with the specific edits and the source citations. Do not write wiki pages yet. End with a one-line summary; your final message MUST be non-empty plain text."
+        prompt="You are running /wiki-ingest as an automated pipeline (no interactive mode, no human in the loop). The load-bearing contract is .wiki/context/schema.md; your mounted orientation explains the pattern to read it through. Read raw/$source, mine it per the schema (entities, concepts, decisions, cross-refs), and WRITE a concrete ingest plan to .wiki/ingest-plan.md naming every page to create or update with the specific edits and the source citations. IMPORTANT: first read the EXISTING pages under team-knowledge/ (outcomes, concepts, people, sources) and reuse an existing entity page when the source refers to the same thing under a different name — do not invent a new slug for an entity that already exists. Do not write wiki pages yet. End with a one-line summary; your final message MUST be non-empty plain text."
     ]
 
     // Step 3 — Apply the plan (LLM): create/edit pages, update index + log, cite.
-    // No goal_gate here: the deterministic verify.sh loop below IS the real gate
-    // (verify -> verify_gate -> write_pages on 'dirty'), which is more trustworthy
-    // than an LLM goal-judge and removes a redundant failure surface.
+    // No goal_gate: the deterministic verify.sh loop below IS the real gate.
     write_pages [
         llm_provider="anthropic",
         prompt="Apply .wiki/ingest-plan.md against the wiki package: create/edit each page following the schema's frontmatter + body conventions, wire [[wikilinks]] and sources[], update index.md, and append one line to log.md. Cite every claim to a source page. Honor the status discipline (settled / working / unsettled; proposals are NOT decisions; never fabricate). End with a non-empty one-line summary of what changed."
     ]
 
-    // Step 5 — Verify (deterministic): the project gate. Route on the script's exit
-    // code + sentinel, NEVER on the model typing a token.
+    // Step 4 — Verify the per-source write (deterministic). Route on exit code + sentinel.
     verify [
         shape=parallelogram,
         tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-verify.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-verify.out && printf clean || printf dirty"
     ]
     verify_gate [shape=diamond]
 
-    // Step 6 — Archive the ingested source (deterministic).
+    // Step 5 — RECONCILE the WHOLE wiki (LLM): the cross-ingest pass a human diff-review
+    // used to supply. Merge duplicate entities, heal orphans, keep the spine coherent.
+    reconcile [
+        llm_provider="anthropic",
+        prompt="Reconcile the ENTIRE wiki (not just this source's pages) so it stays a single coherent knowledge base across ingests. Do ALL of:\n(1) DUPLICATES: find entity pages that are the same thing under different slugs OR share a title (e.g. an 'AIOS' page and an 'Agentic OS' page). MERGE each set into ONE canonical page — keep the richest / most-linked one, fold in the other's unique content and sources[], REPOINT every [[wikilink]] in the wiki to the canonical slug, DELETE the redundant file, and fix index.md.\n(2) ORPHANS: find entity pages with no inbound [[wikilink]] from any other page. Wire each into the spine with a real [[wikilink]] from a genuinely related page (or, if it is truly redundant, merge it away). Do not fabricate relationships.\n(3) Update index.md and append a one-line reconciliation note to log.md.\nThe hardened .wiki/scripts/verify.sh now FAILS on duplicate titles and on orphan entity pages, so leave NONE. End with a non-empty one-line summary of merges/heals (or 'no reconciliation needed')."
+    ]
+
+    // Step 6 — Verify again under the hardened gate (catches dup-titles + orphans).
+    verify2 [
+        shape=parallelogram,
+        tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-verify2.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-verify2.out && printf clean || printf dirty"
+    ]
+    verify2_gate [shape=diamond]
+
+    // Step 7 — Archive the ingested source (deterministic).
     archive [
         shape=parallelogram,
         tool_command="mkdir -p raw/archive && mv raw/$source raw/archive/ && printf archived"
@@ -68,7 +80,11 @@ digraph WikiIngest {
     mine -> write_pages
     write_pages -> verify
     verify -> verify_gate
-    verify_gate -> archive     [condition="context.tool.last_line=clean", weight=10]
+    verify_gate -> reconcile   [condition="context.tool.last_line=clean", weight=10]
     verify_gate -> write_pages [condition="context.tool.last_line=dirty", weight=5]
+    reconcile -> verify2
+    verify2 -> verify2_gate
+    verify2_gate -> archive    [condition="context.tool.last_line=clean", weight=10]
+    verify2_gate -> reconcile  [condition="context.tool.last_line=dirty", weight=5]
     archive -> done
 }
