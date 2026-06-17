@@ -1,0 +1,21 @@
+bundle:
+  name: wiki-agent-anthropic
+  version: 0.1.0
+  description: >
+    Attractor Anthropic coding agent with amplifier-bundle-llm-wiki ORIENTATION
+    wired in DIRECTLY. The bundle's context is mode-gated (contributed by wiki-*
+    modes, which never activate inside an attractor pipeline), so composing the
+    behavior anchor alone yields nothing at runtime. We mount the orientation +
+    pattern lens explicitly here. The load-bearing schema/scripts stay project-side
+    (.wiki/) and are reached by the node's filesystem tools.
+
+# Attractor base (loop-agent + provider + filesystem/bash/search tools), via git
+# URL so its own `attractor:` namespace refs resolve with repo context.
+includes:
+  - bundle: git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=agents/attractor-agent-anthropic.yaml
+
+# llm-wiki orientation, mounted directly (local submodule paths, relative to this file).
+context:
+  include:
+    - ../amplifier-bundle-llm-wiki/docs/llm-wiki-pattern.md
+    - ../amplifier-bundle-llm-wiki/context/wiki-instructions.md

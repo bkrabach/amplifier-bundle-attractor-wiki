@@ -1,0 +1,73 @@
+// wiki-ingest pipeline — the attractor re-expression of /wiki-ingest.
+//
+// Runs under the wiki-agent-anthropic child profile (attractor tools + llm-wiki
+// orientation composed in). The LOAD-BEARING schema/scripts are project-side in
+// .wiki/ and reached by the box nodes' filesystem tools (proven in seam-1); the
+// orientation "why" lens is composed into the agent (proven in seam-2).
+//
+// Node-type discipline (attractor conventions):
+//   parallelogram = deterministic shell (route on EXIT CODE, never LLM text)
+//   box (default) = LLM agent node (judgment / content generation)
+//   diamond       = pure router
+// The verify_gate -> write_pages back-edge is the verify-until-clean V+R loop,
+// a direct translation of /wiki-ingest Step 5 ("both errors and warnings block").
+//
+// STATUS: drafted, NOT yet run end-to-end. Next: run against a throwaway COPY of
+// a seeded wiki (never the real one), prove a box node WRITES pages that pass
+// verify.sh, then A/B-judge its output vs the committed interactive baseline.
+
+digraph WikiIngest {
+    graph [
+        goal="Ingest the source named in $source into the wiki per .wiki/context/schema.md",
+        default_max_retry=3,
+        default_fidelity="full",
+        default_thread_id="wiki-ingest"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Step 1 — Orient (deterministic): is the project initialized + is there a source?
+    orient [
+        shape=parallelogram,
+        tool_command="test -f .wiki/context/schema.md && ls raw/ >/dev/null 2>&1 && printf ready || printf uninitialized"
+    ]
+
+    // Step 2 — Mine the source (LLM): extract per schema, write a concrete ingest plan.
+    mine [
+        llm_provider="anthropic",
+        prompt="You are running /wiki-ingest as an automated pipeline (no interactive mode, no human in the loop). The load-bearing contract is .wiki/context/schema.md; your mounted orientation explains the pattern to read it through. Read raw/$source, mine it per the schema (entities, concepts, decisions, cross-refs), and WRITE a concrete ingest plan to .wiki/ingest-plan.md naming every page to create or update with the specific edits and the source citations. Do not write wiki pages yet. End with a one-line summary; your final message MUST be non-empty plain text."
+    ]
+
+    // Step 3 — Apply the plan (LLM): create/edit pages, update index + log, cite.
+    write_pages [
+        llm_provider="anthropic",
+        goal_gate=true,
+        retry_target="write_pages",
+        prompt="Apply .wiki/ingest-plan.md against the wiki package: create/edit each page following the schema's frontmatter + body conventions, wire [[wikilinks]] and sources[], update index.md, and append one line to log.md. Cite every claim to a source page. Honor the status discipline (settled / working / unsettled; proposals are NOT decisions; never fabricate). End with a non-empty one-line summary of what changed."
+    ]
+
+    // Step 5 — Verify (deterministic): the project gate. Route on the script's exit
+    // code + sentinel, NEVER on the model typing a token.
+    verify [
+        shape=parallelogram,
+        tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-verify.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-verify.out && printf clean || printf dirty"
+    ]
+    verify_gate [shape=diamond]
+
+    // Step 6 — Archive the ingested source (deterministic).
+    archive [
+        shape=parallelogram,
+        tool_command="mkdir -p raw/archive && mv raw/$source raw/archive/ && printf archived"
+    ]
+
+    start -> orient
+    orient -> mine        [condition="context.tool.last_line=ready"]
+    orient -> done        [condition="context.tool.last_line=uninitialized"]
+    mine -> write_pages
+    write_pages -> verify
+    verify -> verify_gate
+    verify_gate -> archive     [condition="context.tool.last_line=clean", weight=10]
+    verify_gate -> write_pages [condition="context.tool.last_line=dirty", weight=5]
+    archive -> done
+}
