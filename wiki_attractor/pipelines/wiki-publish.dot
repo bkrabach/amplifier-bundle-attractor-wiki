@@ -1,0 +1,30 @@
+// wiki-publish pipeline — the attractor re-expression of /wiki-publish.
+//
+// The publish mode is, at heart, ONE deterministic step: run the project's
+// .wiki/scripts/publish.sh (which zips the package to .wiki/dist/). There is no
+// LLM judgment to make here, so this pipeline is intentionally a single tool
+// node — padding it with box nodes would be ceremony, not value. The script
+// encodes the project's publish policy; we just invoke it and let it fail loud.
+//
+// Node-type discipline:
+//   parallelogram = deterministic shell (the publish script; exit code is truth).
+
+digraph WikiPublish {
+    graph [
+        goal="Publish the wiki package via .wiki/scripts/publish.sh",
+        default_thread_id="wiki-publish"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Fail loud if the script is missing (mode Step 1 pre-flight), else run it.
+    // The script prints what it wrote; a non-zero exit fails the node (and pipeline).
+    publish [
+        shape=parallelogram,
+        tool_command="test -x .wiki/scripts/publish.sh || { echo 'publish: missing or non-executable .wiki/scripts/publish.sh (run wiki-attractor init)'; exit 1; }; bash .wiki/scripts/publish.sh"
+    ]
+
+    start -> publish
+    publish -> done
+}

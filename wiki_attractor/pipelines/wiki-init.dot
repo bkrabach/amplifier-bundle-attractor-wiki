@@ -1,0 +1,63 @@
+// wiki-init pipeline — the attractor re-expression of /wiki-init.
+//
+// Scaffolds a NEW pure-markdown LLM wiki (the proven 4-entity-type, story-centered
+// schema: outcomes / concepts / people / sources). Runs on an EMPTY target dir —
+// this is the one bootstrap command, so the CLI's normal "must be an initialized
+// wiki" guard is skipped for it (PipelineSpec.requires_wiki=False).
+//
+// Division of labour, faithful to the bundle's mechanism-vs-policy split:
+//   - DETERMINISTIC (copy_assets): plant the CANONICAL scripts (verify.sh, publish.sh)
+//     byte-for-byte from packaged assets. Scripts are reference implementations at
+//     known paths — they must NOT be LLM-authored (an LLM-written verifier is a
+//     fragile, unproven gate). $ASSETS is the absolute path to the packaged assets
+//     dir, injected by the CLI (same mechanism wiki-review uses for $HELPER).
+//   - LLM (scaffold): author the DOMAIN-specific policy — .wiki/context/schema.md,
+//     the backbone pages, AGENTS/README — from the brief. This is genuinely judgment.
+//   - DETERMINISTIC (verify): run the freshly-planted verify.sh on the new package to
+//     PROVE the scaffold is structurally valid (a fresh wiki has 0 entity pages ->
+//     'verify: clean (0 ...)').
+//
+// SCOPE (honest): this scaffolds the proven 4-type pure-markdown schema. A fully
+// general init (arbitrary entity types) would need a schema-MATCHED verify.sh, which
+// is the wiki-policy-designer agent's harder job — a documented follow-up.
+//
+// Node-type discipline:
+//   parallelogram = deterministic shell   box (default) = LLM judgment
+
+digraph WikiInit {
+    graph [
+        goal="Scaffold a new pure-markdown LLM wiki package named $package for: $brief",
+        default_thread_id="wiki-init"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Step 1 — plant canonical scripts (deterministic). Byte-identical, not authored.
+    copy_assets [
+        shape=parallelogram,
+        tool_command="mkdir -p .wiki/scripts .wiki/context raw && cp $ASSETS/verify.sh .wiki/scripts/verify.sh && cp $ASSETS/publish.sh .wiki/scripts/publish.sh && chmod +x .wiki/scripts/verify.sh .wiki/scripts/publish.sh && touch raw/.gitkeep && printf planted"
+    ]
+
+    // Step 2 — author the domain-specific scaffold (LLM) from the brief.
+    scaffold [
+        llm_provider="anthropic",
+        prompt="You are running /wiki-init as an automated scaffolder. Create a NEW, EMPTY pure-markdown LLM wiki in the current directory. The package directory MUST be named exactly: $package . The wiki's domain/brief is: $brief\\n\\nThis wiki uses the PROVEN 4-entity-type, story-centered schema. The canonical scripts (.wiki/scripts/verify.sh, .wiki/scripts/publish.sh) are ALREADY planted — do NOT touch them. Author everything else:\\n\\n(A) Package dirs: create $package/ with subdirs outcomes/ concepts/ people/ sources/ — put a .gitkeep in each (so they exist empty).\\n\\n(B) Backbone pages under $package/ (EMPTY-BUT-STRUCTURED stubs — do NOT fabricate content; there are no sources yet):\\n   - overview.md  — the narrative spine; frontmatter (title, status: unsettled, updated: today) + a 'REVIEW — populated on first ingest' note. NO type field (backbone pages carry no type).\\n   - index.md     — the catalog; frontmatter (title, status, updated) + one '## <Type>' header per entity type (Outcomes/Concepts/People/Sources), no entries yet.\\n   - open-questions.md — frontmatter (title, status: unsettled, updated) + a structured stub (Tensions / Contradictions headers), no synthetic content.\\n\\n(C) .wiki/context/schema.md — the LOAD-BEARING contract, tailored to the brief. Document: pure-markdown rule (no JSON); the 4 entity types (outcomes=outcome, concepts=concept, people=person, sources=source) and what each holds FOR THIS DOMAIN; the minimal frontmatter (title, type, status, updated, sources[]) with status as a LOAD-BEARING enum settled|working|unsettled; sources/ pages carry a date and may omit sources[]; backbone pages carry NO type; BOTH cross-ref jobs ([[wikilinks]] for ideas->ideas, sources[] for claims->evidence); and an ingest-invariants checklist. Keep it faithful to the proven team-knowledge schema, adapted to the brief's domain.\\n\\n(D) Root files: AGENTS.md (brief operator orientation: what this wiki is, the modes/cycle, the three-zone layout, pointer to .wiki/context/schema.md); README.md (cold-clone orientation); .gitignore (ignore raw/** except .gitkeep, and .wiki/dist/); log.md (an append-only timeline stub with the greppable '## [YYYY-MM-DD] mode | ...' format documented, no entries yet).\\n\\nDo NOT pre-fill any entity pages — the wiki compounds from real sources, not synthetic seeds. End with a non-empty one-line summary of what you scaffolded."
+    ]
+
+    // Step 3 — prove the scaffold is structurally valid under the planted gate.
+    // Normalize the verify output to a single-token sentinel (clean|dirty) so the
+    // router matches on an exact last line, exactly as wiki-ingest.dot does.
+    verify [
+        shape=parallelogram,
+        tool_command="bash .wiki/scripts/verify.sh $package > /tmp/wiki-init-verify.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-init-verify.out && printf clean || printf dirty"
+    ]
+    verify_gate [shape=diamond]
+
+    start -> copy_assets
+    copy_assets -> scaffold
+    scaffold -> verify
+    verify -> verify_gate
+    verify_gate -> done         [condition="context.tool.last_line=clean", weight=10]
+    verify_gate -> scaffold     [condition="context.tool.last_line=dirty", weight=1]
+}

@@ -1,0 +1,50 @@
+// wiki-lint pipeline — the attractor re-expression of /wiki-lint.
+//
+// A READ-ONLY health check. Two layers, matching the mode:
+//   1. MECHANICAL (deterministic): the project's hardened .wiki/scripts/verify.sh
+//      — frontmatter, enums, sources[] resolution, duplicate-title, orphan, and the
+//      status-honesty checks. This is the load-bearing gate; we just RUN it and
+//      CAPTURE its output (we do NOT abort the pipeline on findings — lint reports,
+//      it does not gate, so the box node still runs and contextualises the findings).
+//   2. SEMANTIC (LLM): the higher-order checks a script can't make — contradictions,
+//      stale claims, concept gaps, cross-reference gaps — written up as a report.
+//
+// READ-ONLY: the suggest node MUST NOT mutate the wiki package (team-knowledge/).
+// Its only write is the report at .wiki/lint-report.md (operational scaffolding,
+// outside the shippable package — consistent with "transient artifacts live in
+// .wiki/"). Read-only-ness is enforced at the PROMPT level here (the child agent
+// still carries write tools); the proof is `git status` showing team-knowledge/
+// untouched after a run. A future read-only child profile would harden this.
+//
+// Node-type discipline:
+//   parallelogram = deterministic shell (verify.sh; output captured, never gates)
+//   box (default) = LLM judgment (the semantic health report)
+
+digraph WikiLint {
+    graph [
+        goal="Health-check the wiki: run verify.sh, then surface contradictions, stale claims, orphans, and missing cross-refs",
+        default_thread_id="wiki-lint"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Step 1 — mechanical. `|| true` so verify.sh's non-zero exit on FINDINGS does
+    // not fail the node: lint reports, it does not block. Output is teed to a file
+    // the box node reads, and echoed so it lands in the node record too.
+    verify [
+        shape=parallelogram,
+        tool_command="bash .wiki/scripts/verify.sh > .wiki/lint-verify.out 2>&1 || true; echo '--- verify.sh ---'; cat .wiki/lint-verify.out"
+    ]
+
+    // Step 2 — semantic (READ-ONLY). Reads the captured mechanical output + the wiki,
+    // surfaces higher-order issues, writes a structured report to .wiki/lint-report.md.
+    suggest [
+        llm_provider="anthropic",
+        prompt="You are running /wiki-lint as an automated, READ-ONLY health check. HARD RULE: you MUST NOT create, edit, move, or delete ANY file under team-knowledge/. This is a report-only pass — fixes are applied later by /wiki-ingest, never here. Steps:\\n(1) Read .wiki/lint-verify.out — the mechanical verify.sh output (frontmatter/enum/sources[]/duplicate-title/orphan/status-honesty findings) already captured for you.\\n(2) Read the wiki to make the SEMANTIC checks a script cannot: read team-knowledge/index.md, overview.md, open-questions.md, and the entity pages under team-knowledge/{outcomes,concepts,people,sources}. Do NOT read raw/archive/.\\n(3) Surface, with specific file:claim evidence (never vague): CONTRADICTIONS (page A asserts X, page B asserts not-X); STALE claims (pages a newer source likely superseded); CONCEPT GAPS (a term used across 3+ pages with no page of its own); CROSS-REFERENCE GAPS (an entity named in prose without a [[wikilink]]).\\n(4) WRITE a structured markdown report to .wiki/lint-report.md (this is the ONLY file you may write — it is operational scaffolding, NOT the wiki package). Use this shape:\\n   # Wiki lint — <today>\\n   **Total pages:** N  **verify.sh:** clean|N errors\\n   ## Mechanical (from verify.sh)\\n   ## Contradictions\\n   ## Broken links / orphans / duplicate titles (from verify.sh)\\n   ## Stale claims\\n   ## Concept gaps\\n   ## Cross-reference gaps\\n   ## Suggested actions (severity order: contradictions + broken links first; orphans + stale last)\\nFor any empty category write 'none found'. Do NOT fix anything.\\n(5) End with a non-empty one-line summary naming the total count of findings and whether verify.sh was clean."
+    ]
+
+    start -> verify
+    verify -> suggest
+    suggest -> done
+}

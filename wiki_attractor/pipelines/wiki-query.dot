@@ -1,0 +1,38 @@
+// wiki-query pipeline — the attractor re-expression of /wiki-query.
+//
+// READ-ONLY Q&A against the compiled wiki. One LLM node, the index-first drill the
+// mode prescribes: read index.md first, follow [[wikilinks]] + sources[] into the
+// 3–10 relevant pages, synthesise an answer with a citation on every claim. The
+// question arrives as $question (substituted into the prompt by the CLI, same
+// mechanism wiki-ingest uses for $source).
+//
+// READ-ONLY: the node MUST NOT mutate the wiki package (team-knowledge/). Its only
+// write is the full answer at .wiki/query-answer.md (operational scaffolding outside
+// the package — so the full cited answer persists beyond the 200-char node-record
+// truncation). Read-only-ness is prompt-enforced (the child still carries write
+// tools); the proof is `git status` showing team-knowledge/ untouched.
+//
+// LIMITATION: $question is literal text substituted into the DOT; a question
+// containing a double-quote would break the DOT string. Plain questions are fine;
+// embedded-quote escaping is a future hardening (pass via file/context var).
+//
+// Node-type discipline:
+//   box (default) = LLM judgment (read, synthesise, cite)
+
+digraph WikiQuery {
+    graph [
+        goal="Answer a question against the wiki, index-first, with a citation on every claim",
+        default_thread_id="wiki-query"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    answer [
+        llm_provider="anthropic",
+        prompt="You are running /wiki-query as an automated, READ-ONLY Q&A pass. HARD RULE: you MUST NOT create, edit, move, or delete any file under team-knowledge/. The question to answer is:\\n\\n  $question\\n\\nSteps:\\n(1) INDEX FIRST. Read team-knowledge/index.md — it is the catalog. Identify the 3–10 most relevant pages. Do not grep the whole wiki; the index exists for this.\\n(2) DRILL. Read those pages; follow [[wikilinks]] and sources[] cross-refs as needed. Do NOT read raw/archive/ — those are pre-summarised in the wiki; respect the compilation.\\n(3) SYNTHESISE. Write the answer with a CITATION on EVERY claim, in [[wikilink]] form (e.g. 'Per [[outcomes/team-pulse]], …'). Honor the status discipline: report whether each load-bearing point is settled / working / unsettled exactly as the pages declare it. If the wiki does NOT answer the question, say so plainly and name what to ingest to make it answerable — do NOT fabricate beyond the evidence.\\n(4) WRITE the full cited answer to .wiki/query-answer.md (the ONLY file you may write — operational scaffolding, NOT the wiki package).\\n(5) END with the answer itself as non-empty plain text (a concise version is fine; the full version is in the file)."
+    ]
+
+    start -> answer
+    answer -> done
+}

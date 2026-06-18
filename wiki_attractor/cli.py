@@ -16,7 +16,7 @@ from pathlib import Path
 import click
 
 from . import runner
-from .registry import REGISTRY, PipelineSpec
+from .registry import ASSETS_DIR, REGISTRY, PipelineSpec
 
 _PKG = Path(__file__).resolve().parent
 _REVIEW_HELPER = _PKG / "review_queue.py"
@@ -74,8 +74,22 @@ def _print_result(name: str, result: dict) -> int:
 def _make_session_command(spec: PipelineSpec) -> click.Command:
     @click.pass_context
     def _cmd(ctx: click.Context, **kwargs: str) -> None:
-        wiki_dir = _require_wiki(ctx.obj["wiki_dir"])
+        # requires_wiki gates that the target is an initialized wiki. The ONLY
+        # command that sets it False is the bootstrap (init), which runs on an
+        # empty dir and creates the wiki -- so it skips the guard and ensures the
+        # target dir exists.
+        if spec.requires_wiki:
+            wiki_dir = _require_wiki(ctx.obj["wiki_dir"])
+        else:
+            wiki_dir = Path(ctx.obj["wiki_dir"]).resolve()
+            wiki_dir.mkdir(parents=True, exist_ok=True)
+
         subs = {arg.placeholder: kwargs[arg.name] for arg in spec.args}
+        # asset_subs: resolve each packaged-asset path to absolute and inject it
+        # (lets a pipeline plant CANONICAL files deterministically -- e.g. init
+        # copies the hardened verify.sh rather than have an LLM author it).
+        for placeholder, relpath in spec.asset_subs:
+            subs[placeholder] = str((ASSETS_DIR / relpath).resolve())
 
         # Light, command-agnostic pre-flight for sourced pipelines.
         for arg in spec.args:
