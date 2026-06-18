@@ -1,51 +1,32 @@
 bundle:
   name: wiki-agent-anthropic
-  version: 0.2.0
+  version: 0.3.0
   description: >
-    Attractor Anthropic coding agent with amplifier-bundle-llm-wiki ORIENTATION
-    wired in DIRECTLY. The bundle's context is mode-gated (contributed by wiki-*
-    modes, which never activate inside an attractor pipeline), so composing the
-    behavior anchor alone yields nothing at runtime. We mount the orientation +
-    pattern lens explicitly here. The load-bearing schema/scripts stay project-side
-    (.wiki/) and are reached by the node's filesystem tools.
+    Attractor Anthropic agent for the wiki pipelines. Runs SCHEMA-DRIVEN: the
+    load-bearing contract (status discipline, entity types, cross-ref rules) lives
+    in the project's .wiki/context/schema.md, which the box nodes read via their
+    filesystem tools. No llm-wiki bundle orientation is wired in — see the note below.
 
 # PIPELINE portability (PROVEN): pull the attractor agent base by git URL so the
 # pipeline runs with ZERO dependency on workspace-sibling checkouts. Verified by a
-# sibling-less headless ingest from /tmp/portable-test/attractor-wiki (no sibling
-# repos beside it) — load + prepare + a GREEN 12/12-node wiki-ingest run, all
-# upstream resolved from GitHub.
+# sibling-less headless ingest (no sibling repos beside the companion) — load +
+# prepare + a GREEN wiki-ingest run, all upstream resolved from GitHub.
 includes:
   - bundle: git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=agents/attractor-agent-anthropic.yaml
 
-# ────────────────────────────────────────────────────────────────────────────────
-# ORIENTATION portability — VENDORED, but the injection gap is NOT closed (honest).
-# Vendoring the two orientation files into vendor/llm-wiki/ and referencing them by
-# companion-relative path below makes PATH RESOLUTION portable + self-contained
-# (verified: load_bundle registers both files in bundle.context with absolute paths
-# under the companion, zero sibling deps). BUT the CONTENT still does NOT reach the
-# spawned child agent's runtime context through the attractor spawn path:
-#   • Deterministic: prepared.mount_plan carries session/providers/tools/hooks/agents
-#     but NO `context` content — neither these vendored files NOR the attractor base's
-#     own context/system-anthropic.md appear in it. `context.include` is registered on
-#     the bundle but not assembled into the child session's system context here.
-#   • Behavioral: a no-tools box node, run from a sibling-less copy, was asked to echo
-#     an un-guessable sentinel injected ONLY into the vendored orientation → it replied
-#     "NO-SENTINEL-IN-CONTEXT", and confabulated wrong three-zone/backbone answers.
-# So vendoring did NOT make the orientation compose. The earlier "seam-2 passed" was a
-# FALSE POSITIVE (it asked only a guessable question — "schema wins" — and never
-# checked un-guessable content). The orientation must instead be delivered via a
-# channel the mount_plan actually carries (e.g. the child agent's system `instruction`,
-# or a context module/hook that injects file content) — a design call for root, NOT
-# resolved here. The vendored files + relative paths below are kept as the correct,
-# portable substrate for whichever injection channel is chosen.
-# Refresh of vendored copies: see vendor/README.md.
-# ────────────────────────────────────────────────────────────────────────────────
-# context.include is intentionally OMITTED here. PROVEN above: the attractor spawn path does
-# NOT assemble `context.include` content into the spawned child session, so listing the vendored
-# orientation here would be DEAD CONFIG (a sentinel injected only into the vendored file could not
-# be echoed by a child node). The pipeline runs SCHEMA-DRIVEN — the project-side .wiki/ contract,
-# read via the node's filesystem tools — which is exactly what produced the near-parity full-scale
-# result. So the llm-wiki orientation is NOT required to run, and is NOT currently delivered.
-# The vendored files in vendor/llm-wiki/ are kept as the portable substrate for a FUTURE experiment:
-# deliver orientation through a channel the mount_plan actually carries (the child agent's system
-# `instruction`) and A/B whether it lifts the #1 status-calibration caveat. See vendor/README.md.
+# ───────────────────────────────────────────────────────────────────────────────
+# Why no llm-wiki orientation here (decided by evidence, two findings):
+#   1. It can't be delivered anyway. The attractor spawn path (loop-agent) drops ALL
+#      profile system-prompt content — both `context.include` AND a markdown-body
+#      `instruction:` were proven non-delivering via sentinel tests. (Upstream bug,
+#      written up in UPSTREAM-ISSUE-context-include.md.) Only per-node prompt text
+#      reaches a box node.
+#   2. It isn't worth delivering. A matched A/B (orientation prepended to every node
+#      prompt — the one channel that DOES deliver — vs not) showed NO status-calibration
+#      improvement: deterministic status-honesty oracle = 0 errors both arms, judge = tie.
+#      The settled/working/unsettled discipline lives in schema.md, which both arms
+#      already read via tools; the orientation text doesn't even contain that vocabulary.
+# So the agent is intentionally schema-driven. Don't re-add orientation to chase the
+# status caveat — the lever is the schema + the deterministic status-honesty gate in
+# verify.sh, not orientation delivery.
+# ───────────────────────────────────────────────────────────────────────────────
