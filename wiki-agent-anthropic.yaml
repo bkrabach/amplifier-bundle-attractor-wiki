@@ -1,6 +1,6 @@
 bundle:
   name: wiki-agent-anthropic
-  version: 0.1.0
+  version: 0.2.0
   description: >
     Attractor Anthropic coding agent with amplifier-bundle-llm-wiki ORIENTATION
     wired in DIRECTLY. The bundle's context is mode-gated (contributed by wiki-*
@@ -9,13 +9,43 @@ bundle:
     pattern lens explicitly here. The load-bearing schema/scripts stay project-side
     (.wiki/) and are reached by the node's filesystem tools.
 
-# Attractor base (loop-agent + provider + filesystem/bash/search tools), via git
-# URL so its own `attractor:` namespace refs resolve with repo context.
+# PIPELINE portability (PROVEN): pull the attractor agent base by git URL so the
+# pipeline runs with ZERO dependency on workspace-sibling checkouts. Verified by a
+# sibling-less headless ingest from /tmp/portable-test/attractor-wiki (no sibling
+# repos beside it) — load + prepare + a GREEN 12/12-node wiki-ingest run, all
+# upstream resolved from GitHub.
 includes:
   - bundle: git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=agents/attractor-agent-anthropic.yaml
 
-# llm-wiki orientation, mounted directly (local submodule paths, relative to this file).
-context:
-  include:
-    - ../amplifier-bundle-llm-wiki/docs/llm-wiki-pattern.md
-    - ../amplifier-bundle-llm-wiki/context/wiki-instructions.md
+# ────────────────────────────────────────────────────────────────────────────────
+# ORIENTATION portability — VENDORED, but the injection gap is NOT closed (honest).
+# Vendoring the two orientation files into vendor/llm-wiki/ and referencing them by
+# companion-relative path below makes PATH RESOLUTION portable + self-contained
+# (verified: load_bundle registers both files in bundle.context with absolute paths
+# under the companion, zero sibling deps). BUT the CONTENT still does NOT reach the
+# spawned child agent's runtime context through the attractor spawn path:
+#   • Deterministic: prepared.mount_plan carries session/providers/tools/hooks/agents
+#     but NO `context` content — neither these vendored files NOR the attractor base's
+#     own context/system-anthropic.md appear in it. `context.include` is registered on
+#     the bundle but not assembled into the child session's system context here.
+#   • Behavioral: a no-tools box node, run from a sibling-less copy, was asked to echo
+#     an un-guessable sentinel injected ONLY into the vendored orientation → it replied
+#     "NO-SENTINEL-IN-CONTEXT", and confabulated wrong three-zone/backbone answers.
+# So vendoring did NOT make the orientation compose. The earlier "seam-2 passed" was a
+# FALSE POSITIVE (it asked only a guessable question — "schema wins" — and never
+# checked un-guessable content). The orientation must instead be delivered via a
+# channel the mount_plan actually carries (e.g. the child agent's system `instruction`,
+# or a context module/hook that injects file content) — a design call for root, NOT
+# resolved here. The vendored files + relative paths below are kept as the correct,
+# portable substrate for whichever injection channel is chosen.
+# Refresh of vendored copies: see vendor/README.md.
+# ────────────────────────────────────────────────────────────────────────────────
+# context.include is intentionally OMITTED here. PROVEN above: the attractor spawn path does
+# NOT assemble `context.include` content into the spawned child session, so listing the vendored
+# orientation here would be DEAD CONFIG (a sentinel injected only into the vendored file could not
+# be echoed by a child node). The pipeline runs SCHEMA-DRIVEN — the project-side .wiki/ contract,
+# read via the node's filesystem tools — which is exactly what produced the near-parity full-scale
+# result. So the llm-wiki orientation is NOT required to run, and is NOT currently delivered.
+# The vendored files in vendor/llm-wiki/ are kept as the portable substrate for a FUTURE experiment:
+# deliver orientation through a channel the mount_plan actually carries (the child agent's system
+# `instruction`) and A/B whether it lifts the #1 status-calibration caveat. See vendor/README.md.
