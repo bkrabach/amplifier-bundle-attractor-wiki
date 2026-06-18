@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """wiki-attractor -- a thin click wrapper over the AmplifierSession pipeline runner.
 
-The CLI is intentionally dumb: it builds one click command per registry entry, maps
-the user's CLI arguments to DOT $placeholders, and hands off to the runner. Adding a
-command (step 4: init / lint / publish / query) is a data-only change in registry.py
-plus a .dot file -- this dispatch code does not change.
+The CLI is intentionally dumb: it builds one click command per registry entry,
+maps CLI arguments to DOT $placeholders, and calls runner.run_pipeline. All real
+work lives in the .dot files (wiki_attractor/pipelines/). This dispatch code
+does not change when pipelines are added.
+
+Layer contract:
+  .dot files  — ALL real work; named as their command; portable drop-ins
+  runner.py   — ONLY code that stands up + invokes the attractor engine
+  cli.py      — near-zero wrapper: arg parsing, pre-flight, print result
 """
 
 from __future__ import annotations
@@ -29,8 +34,7 @@ _DEFAULT_CHECKPOINT = Path("/tmp/attractor-pipeline/checkpoint.json")
 
 
 def _clear_checkpoint() -> None:
-    """Remove the engine's default checkpoint so a fresh run can't collide with a
-    stale graph (the CheckpointMismatchError footgun). Single-file unlink only."""
+    """Remove the engine checkpoint so a fresh run can't hit CheckpointMismatchError."""
     try:
         _DEFAULT_CHECKPOINT.unlink()
     except FileNotFoundError:
@@ -43,12 +47,13 @@ def _require_wiki(wiki_dir: Path) -> Path:
     if not schema.exists():
         raise click.ClickException(
             f"{wiki_dir} is not an initialized wiki (missing .wiki/context/schema.md). "
-            "Run wiki-attractor from inside a wiki repo, or pass --wiki-dir."
+            "Run wiki-attractor init, or pass --wiki-dir."
         )
     return wiki_dir
 
 
 def _print_result(name: str, result: dict) -> int:
+    """Print pipeline result. Returns 0 for success, 1 for failure."""
     status = result.get("status")
     click.echo("")
     click.echo(f"========== {name} RESULT ==========")
@@ -61,9 +66,16 @@ def _print_result(name: str, result: dict) -> int:
         click.echo(f"failure_reason  : {result.get('failure_reason')}")
     notes = result.get("notes") or result.get("raw") or ""
     if notes:
-        click.echo(f"notes           : {str(notes)[:1500]}")
-    ok = status in ("success", "completed")
-    return 0 if ok else 1
+        click.echo(f"notes           : {str(notes)[:400]}")
+    # output: full content read back from the pipeline's output file (e.g.
+    # query-answer.md or lint-report.md). Print to stdout so callers receive it.
+    output = result.get("output")
+    if output:
+        click.echo("")
+        click.echo("---------- OUTPUT ----------")
+        click.echo(output)
+        click.echo("----------------------------")
+    return 0 if status in ("success", "completed") else 1
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +86,6 @@ def _print_result(name: str, result: dict) -> int:
 def _make_session_command(spec: PipelineSpec) -> click.Command:
     @click.pass_context
     def _cmd(ctx: click.Context, **kwargs: str) -> None:
-        # requires_wiki gates that the target is an initialized wiki. The ONLY
-        # command that sets it False is the bootstrap (init), which runs on an
-        # empty dir and creates the wiki -- so it skips the guard and ensures the
-        # target dir exists.
         if spec.requires_wiki:
             wiki_dir = _require_wiki(ctx.obj["wiki_dir"])
         else:
@@ -85,13 +93,9 @@ def _make_session_command(spec: PipelineSpec) -> click.Command:
             wiki_dir.mkdir(parents=True, exist_ok=True)
 
         subs = {arg.placeholder: kwargs[arg.name] for arg in spec.args}
-        # asset_subs: resolve each packaged-asset path to absolute and inject it
-        # (lets a pipeline plant CANONICAL files deterministically -- e.g. init
-        # copies the hardened verify.sh rather than have an LLM author it).
         for placeholder, relpath in spec.asset_subs:
             subs[placeholder] = str((ASSETS_DIR / relpath).resolve())
 
-        # Light, command-agnostic pre-flight for sourced pipelines.
         for arg in spec.args:
             if arg.name == "source":
                 src = wiki_dir / "raw" / kwargs["source"]
@@ -107,8 +111,14 @@ def _make_session_command(spec: PipelineSpec) -> click.Command:
         for k, v in subs.items():
             click.echo(f"[wiki-attractor]   {k} = {v}")
 
+        # Single entry point — the lib handles session spin-up.
         result = asyncio.run(
-            runner.run_session_pipeline(dot_path=spec.dot, wiki_dir=wiki_dir, subs=subs)
+            runner.run_pipeline(
+                dot_path=spec.dot,
+                wiki_dir=wiki_dir,
+                subs=subs,
+                output_file=spec.output_file,
+            )
         )
         sys.exit(_print_result(spec.name.upper(), result))
 
@@ -122,8 +132,10 @@ def _make_engine_command(spec: PipelineSpec) -> click.Command:
     @click.option(
         "--decisions",
         default=None,
-        help="Non-interactive: comma-separated C/X/P, one per queue item (e.g. C,X,P). "
-        "Omit for an interactive human gate.",
+        help=(
+            "Non-interactive: comma-separated C/X/P, one per queue item "
+            "(e.g. C,X,P). Omit for an interactive human gate."
+        ),
     )
     @click.pass_context
     def _cmd(ctx: click.Context, decisions: str | None) -> None:
@@ -150,9 +162,14 @@ def _make_engine_command(spec: PipelineSpec) -> click.Command:
             click.echo("[wiki-attractor] review (interactive human gate)")
 
         subs = {"$PYBIN": sys.executable, "$HELPER": str(_REVIEW_HELPER)}
+
+        # Single entry point — interviewer signals engine executor to the lib.
         result = asyncio.run(
-            runner.run_engine_pipeline(
-                dot_path=spec.dot, wiki_dir=wiki_dir, subs=subs, interviewer=interviewer
+            runner.run_pipeline(
+                dot_path=spec.dot,
+                wiki_dir=wiki_dir,
+                subs=subs,
+                interviewer=interviewer,
             )
         )
         sys.exit(_print_result(spec.name.upper(), result))
@@ -164,7 +181,7 @@ _BUILDERS = {"session": _make_session_command, "engine": _make_engine_command}
 
 
 # ---------------------------------------------------------------------------
-# Root group -- default action lists the pipelines + help.
+# Root group
 # ---------------------------------------------------------------------------
 
 
@@ -185,8 +202,8 @@ _BUILDERS = {"session": _make_session_command, "engine": _make_engine_command}
 def main(ctx: click.Context, wiki_dir: Path | None, fresh: bool) -> None:
     """Run amplifier-bundle-llm-wiki workflows as attractor pipelines.
 
-    Each subcommand drives a .dot pipeline (registry.py). The tool is run from
-    inside a wiki repo; override with --wiki-dir.
+    Each subcommand drives a .dot pipeline (wiki_attractor/pipelines/).
+    Run from inside a wiki repo; override with --wiki-dir.
     """
     ctx.ensure_object(dict)
     ctx.obj["wiki_dir"] = wiki_dir if wiki_dir is not None else Path.cwd()
@@ -199,7 +216,7 @@ def main(ctx: click.Context, wiki_dir: Path | None, fresh: bool) -> None:
             click.echo(f"  {spec.name:<8} {spec.summary}")
 
 
-# Register every pipeline as a command (data-driven dispatch).
+# Register every pipeline as a command.
 for _spec in REGISTRY.values():
     main.add_command(_BUILDERS[_spec.executor](_spec))
 

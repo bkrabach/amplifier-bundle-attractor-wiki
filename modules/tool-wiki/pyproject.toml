@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplifier-module-tool-wiki"
+version = "0.1.0"
+description = "Amplifier tool module: exposes the 6 wiki-attractor commands as mountable tools in an AmplifierSession."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+# wiki-attractor is the companion package, installed editably into the same venv.
+# amplifier-core is a peer dependency provided by the host amplifier install.
+dependencies = ["wiki-attractor"]
+
+[project.entry-points."amplifier.modules"]
+tool-wiki = "amplifier_module_tool_wiki:mount"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_tool_wiki"]

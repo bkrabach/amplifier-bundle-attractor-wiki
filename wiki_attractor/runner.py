@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """The light AmplifierSession spin-up for running attractor pipelines.
 
-This is the load-bearing lib the CLI wraps. It factors the PROVEN machinery out
-of the run_seam.py / run_ingest.py / run_review.py spikes into two reusable
-executors. Nothing here is new logic -- it is the spike code, de-duplicated:
+PUBLIC API — one entry point:
 
-  run_session_pipeline(...)  -- the Path-B AmplifierSession executor. Box (LLM)
-      nodes spawn full child sessions with tools. Used by `wiki-attractor ingest`.
-      This is "the light implementation of what is needed to spin up an
-      AmplifierSession instance to run attractor pipelines."
+  run_pipeline(dot_path, wiki_dir, subs, *, interviewer, output_file) → result dict
 
-  run_engine_pipeline(...)   -- the direct PipelineEngine executor for HITL
-      pipelines (tool + diamond + hexagon nodes, no LLM). Used by
-      `wiki-attractor review`. Takes an Interviewer for the human gate.
+That is the ONLY function the CLI and (later) tool-modules need. Everything
+else is private plumbing. The real work lives in the .dot files; this module
+is ONLY responsible for standing up the attractor engine and handing it a
+populated DOT string.
+
+Two internal paths:
+  _run_session_pipeline  — Path-B AmplifierSession; LLM box nodes with tools.
+  _run_engine_pipeline   — direct PipelineEngine; HITL tool/diamond/hexagon.
 
 Run only with the amplifier tool venv python (has amplifier_foundation):
   ~/.local/share/uv/tools/amplifier/bin/python
@@ -35,10 +35,9 @@ ATTRACTOR_BUNDLE = (
     "#subdirectory=bundles/attractor-pipeline.yaml"
 )
 
-# The attractor bundle pins claude-sonnet-4-20250514, which retired 2026-06-15.
-# Use the routing-matrix "latest sonnet" glob: the resolver matches it against the
-# provider's live model list (sorted descending) and picks the newest, so it never
-# pins a model that can retire out from under us.
+# The routing-matrix "latest sonnet" glob: the resolver matches it against the
+# provider's live model list (sorted descending) and picks the newest — never
+# pins a retired model.
 CURRENT_MODEL = "claude-sonnet-*"
 
 PROFILES_MAP = {
@@ -48,35 +47,24 @@ PROFILES_MAP = {
 }
 
 _PKG = Path(__file__).resolve().parent
-# The llm-wiki-composed child agent profile (schema-driven; portable via git-URL
-# include). Overrides the attractor anthropic child agent at spawn time.
+# The wiki-agent child profile (schema-driven; portable via git-URL include).
 WIKI_AGENT_PROFILE = _PKG / "profiles" / "wiki-agent-anthropic.yaml"
 
 
 def _apply_subs(dot_text: str, subs: dict[str, str] | None) -> str:
-    """Literal placeholder substitution into the DOT text before the engine sees it.
-
-    The proven mechanism for $source / $PYBIN / $HELPER injection: string-replace
-    in the raw .dot text (substitution.py treats absent keys as literal anyway).
-    """
+    """Literal placeholder substitution into the DOT text before the engine sees it."""
     for key, val in (subs or {}).items():
         dot_text = dot_text.replace(key, val)
     return dot_text
 
 
 # ---------------------------------------------------------------------------
-# Session executor (ingest) -- the Path-B AmplifierSession spin-up.
+# Private: session executor (LLM / box nodes).
 # ---------------------------------------------------------------------------
 
 
 def _register_spawn_capability(session: Any, prepared: Any) -> None:
-    """Wire session.spawn so pipeline LLM nodes get full child sessions with tools.
-
-    Verbatim from run_seam.py (the documented attractor reference impl, plus the
-    two proven fixes: attractor:-namespace -> git-URL rewrite, and a typed
-    ProviderPreference using the latest-sonnet glob). Without this, loop-pipeline
-    silently falls back to the no-tools DirectProviderBackend.
-    """
+    """Wire session.spawn so pipeline LLM nodes get full child sessions with tools."""
     from amplifier_foundation import Bundle, load_bundle
     from amplifier_foundation.spawn_utils import ProviderPreference
 
@@ -102,8 +90,7 @@ def _register_spawn_capability(session: Any, prepared: Any) -> None:
 
         if "bundle" in config and len(config) == 1:
             ref = config["bundle"]
-            # The standalone registry has no 'attractor:' namespace handler, so
-            # rewrite namespace refs to resolvable git URLs before loading.
+            # Rewrite 'attractor:' namespace refs to resolvable git URLs.
             if ref.startswith("attractor:"):
                 sub = ref.split("attractor:", 1)[1]
                 ref = (
@@ -141,27 +128,13 @@ def _register_spawn_capability(session: Any, prepared: Any) -> None:
     session.coordinator.register_capability("session.spawn", spawn_capability)
 
 
-async def run_session_pipeline(
-    dot_path: Path,
+async def _run_session_pipeline(
+    dot_text: str,
     wiki_dir: Path,
-    subs: dict[str, str] | None = None,
     agent_profile: Path = WIKI_AGENT_PROFILE,
 ) -> dict[str, Any]:
-    """Spin up an AmplifierSession and run a (box-node) attractor pipeline in `wiki_dir`.
-
-    The reusable core of run_seam.py + run_ingest.py:
-      load attractor base -> compose loop-pipeline overlay (profiles map +
-      dot_source + wiki-agent child override) -> prepare -> create_session(cwd) ->
-      register spawn -> chdir into the wiki (for deterministic tool nodes) ->
-      execute -> return parsed result JSON.
-
-    Returns the pipeline result dict (parsed JSON), or {"status": "unknown", ...}
-    if the engine returned non-JSON.
-    """
+    """Spin up an AmplifierSession and run a dot pipeline in wiki_dir."""
     from amplifier_foundation import Bundle, load_bundle
-
-    wiki_dir = Path(wiki_dir).resolve()
-    dot_text = _apply_subs(Path(dot_path).read_text(), subs)
 
     bundle = await load_bundle(ATTRACTOR_BUNDLE)
     overlay = Bundle(
@@ -172,17 +145,13 @@ async def run_session_pipeline(
                 "config": {"profiles": PROFILES_MAP, "dot_source": dot_text},
             }
         },
-        # Override the anthropic child agent with the llm-wiki-composed profile.
         agents={"attractor-agent-anthropic": {"bundle": str(agent_profile)}},
     )
     composed = bundle.compose(overlay)
-
     prepared = await composed.prepare()
     session = await prepared.create_session(session_cwd=wiki_dir)
     _register_spawn_capability(session, prepared)
 
-    # Make the wiki the process cwd so deterministic (parallelogram) nodes, whose
-    # subprocess cwd falls back to process cwd, run inside the wiki.
     os.chdir(wiki_dir)
 
     async with session:
@@ -195,27 +164,16 @@ async def run_session_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# Engine executor (review/HITL) -- direct PipelineEngine with an Interviewer.
+# Private: engine executor (HITL / tool+diamond+hexagon nodes, no LLM).
 # ---------------------------------------------------------------------------
 
 
-async def run_engine_pipeline(
-    dot_path: Path,
+async def _run_engine_pipeline(
+    dot_text: str,
     wiki_dir: Path,
-    subs: dict[str, str] | None = None,
     interviewer: Any | None = None,
 ) -> dict[str, Any]:
-    """Run a HITL (hexagon-gate) attractor pipeline directly via PipelineEngine.
-
-    The reusable core of run_review.py. The standard session path builds its
-    HandlerContext WITHOUT an interviewer, so a hexagon gate would raise. We build
-    the PipelineEngine directly with an Interviewer wired into the HandlerContext.
-    wiki-review.dot uses only tool + diamond + hexagon nodes (no codergen), so
-    backend=None is sufficient -- no provider keys, no spawn, no LLM calls.
-
-    `interviewer` is any amplifier Interviewer (ConsoleInterviewer for a real human,
-    QueueInterviewer for preset/non-interactive decisions).
-    """
+    """Run a HITL pipeline directly via PipelineEngine (no AmplifierSession)."""
     from amplifier_module_loop_pipeline.context import PipelineContext
     from amplifier_module_loop_pipeline.dot_parser import parse_dot
     from amplifier_module_loop_pipeline.engine import PipelineEngine
@@ -223,9 +181,6 @@ async def run_engine_pipeline(
     from amplifier_module_loop_pipeline.handlers.context import HandlerContext
     from amplifier_module_loop_pipeline.transforms import apply_transforms
     from amplifier_module_loop_pipeline.validation import validate_or_raise
-
-    wiki_dir = Path(wiki_dir).resolve()
-    dot_text = _apply_subs(Path(dot_path).read_text(), subs)
 
     graph = parse_dot(dot_text)
     context = PipelineContext()
@@ -241,7 +196,6 @@ async def run_engine_pipeline(
         logs_root=logs_root,
     )
 
-    # Tool nodes inherit process cwd when context.target_dir/source_dir are unset.
     os.chdir(wiki_dir)
 
     outcome = await engine.run()
@@ -252,3 +206,56 @@ async def run_engine_pipeline(
         "failure_reason": getattr(outcome, "failure_reason", None),
         "logs_root": logs_root,
     }
+
+
+# ---------------------------------------------------------------------------
+# PUBLIC API — the single entry point callers use.
+# ---------------------------------------------------------------------------
+
+
+async def run_pipeline(
+    dot_path: Path | str,
+    wiki_dir: Path | str,
+    subs: dict[str, str] | None = None,
+    *,
+    interviewer: Any | None = None,
+    output_file: str | None = None,
+) -> dict[str, Any]:
+    """Run a .dot attractor pipeline in wiki_dir and return the result dict.
+
+    This is the ONLY function the CLI and tool-modules call. It:
+      1. Reads the .dot file and applies literal $placeholder substitutions (subs).
+      2. Routes to the appropriate internal executor:
+           - interviewer=None  → session executor (AmplifierSession + LLM box nodes)
+           - interviewer=...   → engine executor (PipelineEngine, HITL, no LLM)
+      3. If output_file is set AND the run succeeded, reads wiki_dir/output_file
+         and adds its content as result["output"]. This is the clean mechanism
+         for pipelines (like query) whose real output exceeds the 200-char
+         node-record limit — they write to a known file; the lib reads it back.
+
+    Args:
+        dot_path:    Path to the .dot file (already-renamed, e.g. pipelines/query.dot).
+        wiki_dir:    Root of the wiki repo to operate on.
+        subs:        Dict of $placeholder -> value substituted into the DOT text.
+        interviewer: If set, use the engine executor (HITL). None → session executor.
+        output_file: Optional relative path (within wiki_dir) to read back after a
+                     successful run and add as result["output"].
+
+    Returns:
+        Result dict from the engine, optionally enriched with result["output"].
+    """
+    wiki_dir = Path(wiki_dir).resolve()
+    dot_text = _apply_subs(Path(dot_path).read_text(), subs)
+
+    if interviewer is not None:
+        result = await _run_engine_pipeline(dot_text, wiki_dir, interviewer=interviewer)
+    else:
+        result = await _run_session_pipeline(dot_text, wiki_dir)
+
+    # If the pipeline succeeded and an output file is declared, read it back.
+    if output_file and result.get("status") in ("success", "completed"):
+        out_path = wiki_dir / output_file
+        if out_path.exists():
+            result["output"] = out_path.read_text()
+
+    return result
