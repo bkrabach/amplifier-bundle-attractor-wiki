@@ -14,7 +14,7 @@ The .dot files are the portable artifacts; the lib (runner.py) is one convenienc
 wrapper. This proves the dots work without that wrapper.
 
 Run with:
-  ~/.local/share/uv/tools/amplifier/bin/python drop_in_runner.py
+  ~/.local/share/uv/tools/amplifier/bin/python examples/drop_in_runner.py
 """
 
 from __future__ import annotations
@@ -41,7 +41,10 @@ PROFILES_MAP = {
 # A true drop-in consumer would reference this by git URL; here we use local path
 # since we're in the same repo, which is equivalent (same file content).
 WIKI_AGENT_PROFILE = str(
-    Path(__file__).resolve().parent / "wiki_attractor" / "profiles" / "wiki-agent-anthropic.yaml"
+    Path(__file__).resolve().parent.parent
+    / "wiki_attractor"
+    / "profiles"
+    / "wiki-agent-anthropic.yaml"
 )
 
 
@@ -51,10 +54,16 @@ def _register_spawn(session, prepared):
     from amplifier_foundation.spawn_utils import ProviderPreference  # noqa: PLC0415
 
     async def spawn_capability(
-        agent_name, instruction, parent_session, agent_configs,
-        sub_session_id=None, orchestrator_config=None,
-        parent_messages=None, provider_preferences=None,
-        self_delegation_depth=0, **kwargs,
+        agent_name,
+        instruction,
+        parent_session,
+        agent_configs,
+        sub_session_id=None,
+        orchestrator_config=None,
+        parent_messages=None,
+        provider_preferences=None,
+        self_delegation_depth=0,
+        **kwargs,
     ):
         if agent_name in agent_configs:
             config = agent_configs[agent_name]
@@ -74,7 +83,8 @@ def _register_spawn(session, prepared):
             child_bundle = await load_bundle(ref)
         else:
             child_bundle = Bundle(
-                name=agent_name, version="1.0.0",
+                name=agent_name,
+                version="1.0.0",
                 session=config.get("session", {}),
                 providers=config.get("providers", []),
                 tools=config.get("tools", []),
@@ -83,12 +93,17 @@ def _register_spawn(session, prepared):
             )
 
         if not provider_preferences:
-            provider_preferences = [ProviderPreference(provider="anthropic", model=CURRENT_MODEL)]
+            provider_preferences = [
+                ProviderPreference(provider="anthropic", model=CURRENT_MODEL)
+            ]
 
         return await prepared.spawn(
-            child_bundle=child_bundle, instruction=instruction,
-            session_id=sub_session_id, parent_session=parent_session,
-            orchestrator_config=orchestrator_config, parent_messages=parent_messages,
+            child_bundle=child_bundle,
+            instruction=instruction,
+            session_id=sub_session_id,
+            parent_session=parent_session,
+            orchestrator_config=orchestrator_config,
+            parent_messages=parent_messages,
             provider_preferences=provider_preferences,
             self_delegation_depth=self_delegation_depth,
         )
@@ -145,12 +160,20 @@ async def run_dot_dropin(dot_path: Path, wiki_dir: Path, subs: dict[str, str]) -
 
 async def main() -> int:
     # The .dot file — referenced DIRECTLY by path, no wiki_attractor import.
-    dot_path = Path(__file__).resolve().parent / "wiki_attractor" / "pipelines" / "query.dot"
+    # This file is in examples/; the dots are in ../wiki_attractor/pipelines/
+    dot_path = (
+        Path(__file__).resolve().parent.parent
+        / "wiki_attractor"
+        / "pipelines"
+        / "query.dot"
+    )
     wiki_dir = Path("/home/bkrabach/dev/llm-wiki-pipeline/team-knowledge-wiki")
     question = "What is Team Pulse and what role does it play for the team?"
 
     assert dot_path.exists(), f"query.dot not found at {dot_path}"
-    assert (wiki_dir / ".wiki" / "context" / "schema.md").exists(), "wiki_dir not an initialized wiki"
+    assert (wiki_dir / ".wiki" / "context" / "schema.md").exists(), (
+        "wiki_dir not an initialized wiki"
+    )
 
     print(f"[dropin] dot file  : {dot_path}")
     print(f"[dropin] wiki dir  : {wiki_dir}")

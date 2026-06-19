@@ -1,0 +1,22 @@
+bundle:
+  name: attractor-wiki-behavior
+  version: 0.1.0
+  description: >
+    Mounts the 6 wiki-attractor tools (wiki_ingest, wiki_query, wiki_lint,
+    wiki_publish, wiki_init, wiki_review) and thin orientation context.
+    Compose onto any bundle to add wiki automation tools.
+
+# source: is relative to THIS FILE's directory (behaviors/).
+# ../modules/tool-wiki resolves to <repo-root>/modules/tool-wiki.
+# Post-publish form (documented, not active):
+#   source: git+https://github.com/bkrabach/amplifier-bundle-attractor-wiki@main#subdirectory=modules/tool-wiki
+tools:
+  - module: tool-wiki
+    source: ../modules/tool-wiki
+
+# NO @ prefix in YAML context.include — bare bundle:path form.
+# attractor-wiki: refers to the ROOT bundle's namespace (registered by bundle.md).
+# When composed via the root bundle, this resolves to <repo-root>/context/attractor-wiki-awareness.md.
+context:
+  include:
+    - attractor-wiki:context/attractor-wiki-awareness.md

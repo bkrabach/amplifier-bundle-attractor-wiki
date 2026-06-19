@@ -14,8 +14,8 @@ Two paths demonstrated:
       are also portable; for full filesystem-tool quality use AmplifierSession.
 
 Usage:
-  python drop_in_demo.py publish <wiki_dir>
-  python drop_in_demo.py query   <wiki_dir> "what is Team Pulse?"
+  python examples/drop_in_demo.py publish <wiki_dir>
+  python examples/drop_in_demo.py query   <wiki_dir> "what is Team Pulse?"
 """
 
 from __future__ import annotations
@@ -122,7 +122,8 @@ def main() -> None:
     wiki_dir = Path(sys.argv[2])
     question = sys.argv[3] if len(sys.argv) > 3 else "what is Team Pulse?"
 
-    _PKG = Path(__file__).resolve().parent / "wiki_attractor" / "pipelines"
+    # pipelines are in ../wiki_attractor/pipelines/ relative to this file (in examples/)
+    _PKG = Path(__file__).resolve().parent.parent / "wiki_attractor" / "pipelines"
 
     print("[drop-in] Imports: amplifier_module_loop_pipeline only — NO wiki_attractor")
 

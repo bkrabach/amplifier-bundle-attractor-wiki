@@ -14,7 +14,7 @@ ARCHITECTURE:
   The cited answer returns as the tool result.
 
 Run with:
-  ~/.local/share/uv/tools/amplifier/bin/python prove_tool_consumer.py
+  ~/.local/share/uv/tools/amplifier/bin/python examples/prove_tool_consumer.py
 """
 
 from __future__ import annotations
@@ -29,8 +29,12 @@ QUESTION = "What is Team Pulse and what role does it play for the team?"
 
 # Use the wiki-agent child profile directly (loop-agent + filesystem/bash/search tools).
 # This is the same profile our pipelines use for child sessions.
+# This file is in examples/; the profile is in ../wiki_attractor/profiles/
 WIKI_AGENT_BUNDLE = str(
-    Path(__file__).resolve().parent / "wiki_attractor" / "profiles" / "wiki-agent-anthropic.yaml"
+    Path(__file__).resolve().parent.parent
+    / "wiki_attractor"
+    / "profiles"
+    / "wiki-agent-anthropic.yaml"
 )
 
 # Model glob: self-tracks latest sonnet via routing-matrix pattern.
@@ -78,12 +82,17 @@ async def main() -> int:
     print("=" * 60)
     print("TOOL CONSUMER PROOF — RESULT")
     print("=" * 60)
-    print(f"raw result (first 1000 chars):")
+    print("raw result (first 1000 chars):")
     print(result_str[:1000])
     print()
 
-    proven = "TOOL_CONSUMER_PROVEN" in result_str.upper() or "team pulse" in result_str.lower()
-    print(f"VERDICT: {'TOOL_CONSUMER_PROVEN' if proven else 'NOT PROVEN (check output above)'}")
+    proven = (
+        "TOOL_CONSUMER_PROVEN" in result_str.upper()
+        or "team pulse" in result_str.lower()
+    )
+    print(
+        f"VERDICT: {'TOOL_CONSUMER_PROVEN' if proven else 'NOT PROVEN (check output above)'}"
+    )
     return 0 if proven else 1
 
 

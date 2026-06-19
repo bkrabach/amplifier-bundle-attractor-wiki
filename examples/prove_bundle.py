@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
 ROB GATE — prove load_bundle() on bundle.md mounts all 6 wiki tools.
-Run with: /home/bkrabach/.local/share/uv/tools/amplifier/bin/python prove_bundle.py
+Run with: /home/bkrabach/.local/share/uv/tools/amplifier/bin/python examples/prove_bundle.py
 """
+
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
 
 
-BUNDLE_MD = Path(__file__).parent / "bundle.md"
+BUNDLE_MD = Path(__file__).parent.parent / "bundle.md"
 
 
 async def main() -> None:
@@ -35,7 +36,7 @@ async def main() -> None:
         print(f"  module: {t.get('module')}  source: {t.get('source')}")
 
     # Step 3 — prepare() so the module actually installs and its entry point is registered
-    print("\n[prove] prepare() (will install tool-wiki from ./modules/tool-wiki) ...")
+    print("\n[prove] prepare() (will install tool-wiki from ../modules/tool-wiki) ...")
     prepared = await bundle.prepare()
     print(f"[prove] prepared type: {type(prepared).__name__}")
 
@@ -50,6 +51,7 @@ async def main() -> None:
     # Step 5 — verify the module's entry point is now importable
     print("\n[prove] import check: amplifier_module_tool_wiki ...")
     import importlib.util
+
     spec = importlib.util.find_spec("amplifier_module_tool_wiki")
     if spec:
         print(f"[prove] FOUND at: {spec.origin}")
@@ -65,15 +67,23 @@ async def main() -> None:
 
     if spec:
         from amplifier_module_tool_wiki import mount
+
         result = await mount(coordinator)
         print(f"[prove] mount() return: {result}")
         calls = coordinator.mount.call_args_list
-        tool_names = [c[1].get("name", c[0][1].name if len(c[0]) > 1 else "?")
-                      for c in calls]
+        tool_names = [
+            c[1].get("name", c[0][1].name if len(c[0]) > 1 else "?") for c in calls
+        ]
         print(f"[prove] tools registered ({len(tool_names)}): {tool_names}")
 
-        expected = {"wiki_ingest", "wiki_query", "wiki_lint",
-                    "wiki_publish", "wiki_init", "wiki_review"}
+        expected = {
+            "wiki_ingest",
+            "wiki_query",
+            "wiki_lint",
+            "wiki_publish",
+            "wiki_init",
+            "wiki_review",
+        }
         found = set(tool_names)
         missing = expected - found
         extra = found - expected
@@ -84,7 +94,7 @@ async def main() -> None:
     else:
         print("[prove] SKIP mount() — module not importable; install failed")
 
-    print(f"\n[prove] SUMMARY")
+    print("\n[prove] SUMMARY")
     print(f"  bundle.name = {bundle.name!r}")
     print(f"  tools in plan = {[t.get('module') for t in tools_in_plan]}")
 
