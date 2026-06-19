@@ -8,9 +8,12 @@ version = "0.1.0"
 description = "Amplifier tool module: exposes the 6 wiki-attractor commands as mountable tools in an AmplifierSession."
 requires-python = ">=3.11"
 license = { text = "MIT" }
-# wiki-attractor is the companion package, installed editably into the same venv.
-# amplifier-core is a peer dependency provided by the host amplifier install.
-dependencies = ["wiki-attractor"]
+# wiki-attractor is a PEER dependency — the bundle root's pyproject.toml declares it,
+# and Bundle.prepare() installs the bundle package (wiki-attractor) BEFORE activating
+# modules. Listing it here causes `uv pip install --no-sources` to fail trying to
+# resolve it from PyPI. Same rule as amplifier-core: peer deps are NOT listed here.
+# amplifier-core is also a peer dependency provided by the host amplifier install.
+dependencies = []
 
 [project.entry-points."amplifier.modules"]
 tool-wiki = "amplifier_module_tool_wiki:mount"
