@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""wiki-attractor -- a thin click wrapper over the AmplifierSession pipeline runner.
+"""wiki-attractor -- a thin click wrapper over the wiki-attractor API.
 
-The CLI is intentionally dumb: it builds one click command per registry entry,
-maps CLI arguments to DOT $placeholders, and calls runner.run_pipeline. All real
-work lives in the .dot files (wiki_attractor/pipelines/). This dispatch code
-does not change when pipelines are added.
+The CLI is intentionally thin: it parses click arguments, handles CLI-specific
+concerns (--fresh checkpoint clearing, ConsoleInterviewer for interactive
+review, pre-flight source-file validation), and delegates to the bespoke
+wiki_attractor API (wiki_attractor.api) for each command.
 
 Layer contract:
-  .dot files  — ALL real work; named as their command; portable drop-ins
-  runner.py   — ONLY code that stands up + invokes the attractor engine
-  cli.py      — near-zero wrapper: arg parsing, pre-flight, print result
+  .dot files    — ALL real work; named as their command; portable drop-ins
+  api.py        — bespoke wiki-attractor typed API; one named fn per command
+  runner.py     — ONLY code that stands up + invokes the attractor engine
+  cli.py        — near-zero wrapper: arg parsing, pre-flight, print result
 """
 
 from __future__ import annotations
@@ -17,14 +18,13 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
-from . import runner
-from .registry import ASSETS_DIR, REGISTRY, PipelineSpec
+import wiki_attractor.api as _api
+from .registry import REGISTRY, PipelineSpec
 
-_PKG = Path(__file__).resolve().parent
-_REVIEW_HELPER = _PKG / "review_queue.py"
 _DEFAULT_CHECKPOINT = Path("/tmp/attractor-pipeline/checkpoint.json")
 
 
@@ -41,18 +41,7 @@ def _clear_checkpoint() -> None:
         pass
 
 
-def _require_wiki(wiki_dir: Path) -> Path:
-    wiki_dir = Path(wiki_dir).resolve()
-    schema = wiki_dir / ".wiki" / "context" / "schema.md"
-    if not schema.exists():
-        raise click.ClickException(
-            f"{wiki_dir} is not an initialized wiki (missing .wiki/context/schema.md). "
-            "Run wiki-attractor init, or pass --wiki-dir."
-        )
-    return wiki_dir
-
-
-def _print_result(name: str, result: dict) -> int:
+def _print_result(name: str, result: dict[str, Any]) -> int:
     """Print pipeline result. Returns 0 for success, 1 for failure."""
     status = result.get("status")
     click.echo("")
@@ -79,6 +68,23 @@ def _print_result(name: str, result: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# API dispatch table — maps command name to its coroutine factory.
+#
+# Each entry calls the bespoke named API function for that command, keeping
+# the CLI data-driven while flowing entirely through the typed API layer.
+# Adding a 7th command: one REGISTRY entry + one lambda here + one .dot file.
+# ---------------------------------------------------------------------------
+
+_COMMAND_DISPATCH: dict[str, Any] = {
+    "ingest": lambda wd, **kw: _api.ingest(wd, kw["source"]),
+    "query": lambda wd, **kw: _api.query(wd, kw["question"]),
+    "lint": lambda wd, **kw: _api.lint(wd),
+    "publish": lambda wd, **kw: _api.publish(wd),
+    "init": lambda wd, **kw: _api.init(wd, kw["package"], kw["brief"]),
+}
+
+
+# ---------------------------------------------------------------------------
 # Command builders (one per executor kind), wired from the registry.
 # ---------------------------------------------------------------------------
 
@@ -86,40 +92,32 @@ def _print_result(name: str, result: dict) -> int:
 def _make_session_command(spec: PipelineSpec) -> click.Command:
     @click.pass_context
     def _cmd(ctx: click.Context, **kwargs: str) -> None:
-        if spec.requires_wiki:
-            wiki_dir = _require_wiki(ctx.obj["wiki_dir"])
-        else:
-            wiki_dir = Path(ctx.obj["wiki_dir"]).resolve()
-            wiki_dir.mkdir(parents=True, exist_ok=True)
+        wiki_dir = ctx.obj["wiki_dir"]
 
-        subs = {arg.placeholder: kwargs[arg.name] for arg in spec.args}
-        for placeholder, relpath in spec.asset_subs:
-            subs[placeholder] = str((ASSETS_DIR / relpath).resolve())
-
-        for arg in spec.args:
-            if arg.name == "source":
-                src = wiki_dir / "raw" / kwargs["source"]
-                if not src.exists():
-                    raise click.ClickException(
-                        f"source not found in raw/: {kwargs['source']}"
-                    )
+        # ingest: validate the source file exists in raw/ as a CLI pre-flight.
+        # The api validates the wiki itself; this check gives a clearer error
+        # message before the pipeline starts.
+        if spec.name == "ingest":
+            src = Path(wiki_dir).resolve() / "raw" / kwargs["source"]
+            if not src.exists():
+                raise click.ClickException(
+                    f"source not found in raw/: {kwargs['source']}"
+                )
 
         if ctx.obj["fresh"]:
             _clear_checkpoint()
 
-        click.echo(f"[wiki-attractor] {spec.name}: {wiki_dir}")
-        for k, v in subs.items():
+        click.echo(f"[wiki-attractor] {spec.name}: {Path(wiki_dir).resolve()}")
+        for k, v in kwargs.items():
             click.echo(f"[wiki-attractor]   {k} = {v}")
 
-        # Single entry point — the lib handles session spin-up.
-        result = asyncio.run(
-            runner.run_pipeline(
-                dot_path=spec.dot,
-                wiki_dir=wiki_dir,
-                subs=subs,
-                output_file=spec.output_file,
-            )
-        )
+        # Call the bespoke API function for this command.
+        # ValueError is api's way of signalling a user-readable error.
+        try:
+            result = asyncio.run(_COMMAND_DISPATCH[spec.name](wiki_dir, **kwargs))
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
         sys.exit(_print_result(spec.name.upper(), result))
 
     cmd = click.command(name=spec.name, help=spec.summary)(_cmd)
@@ -139,13 +137,7 @@ def _make_engine_command(spec: PipelineSpec) -> click.Command:
     )
     @click.pass_context
     def _cmd(ctx: click.Context, decisions: str | None) -> None:
-        wiki_dir = _require_wiki(ctx.obj["wiki_dir"])
-        queue = wiki_dir / "team-knowledge" / "flag-queue.json"
-        if not queue.exists():
-            raise click.ClickException(
-                "no team-knowledge/flag-queue.json -- run `wiki-attractor ingest` first "
-                "(the reviewer node emits the queue)."
-            )
+        wiki_dir = ctx.obj["wiki_dir"]
 
         from amplifier_module_loop_pipeline.interviewer import (  # noqa: PLC0415
             Answer,
@@ -155,23 +147,18 @@ def _make_engine_command(spec: PipelineSpec) -> click.Command:
 
         if decisions:
             picks = [d.strip().upper() for d in decisions.split(",") if d.strip()]
-            interviewer = QueueInterviewer([Answer(value=d) for d in picks])
+            interviewer: Any = QueueInterviewer([Answer(value=d) for d in picks])
             click.echo(f"[wiki-attractor] review (non-interactive): {picks}")
         else:
             interviewer = ConsoleInterviewer()
             click.echo("[wiki-attractor] review (interactive human gate)")
 
-        subs = {"$PYBIN": sys.executable, "$HELPER": str(_REVIEW_HELPER)}
+        # Call the bespoke review() API function; pass the caller-built interviewer.
+        try:
+            result = asyncio.run(_api.review(wiki_dir, interviewer=interviewer))
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
 
-        # Single entry point — interviewer signals engine executor to the lib.
-        result = asyncio.run(
-            runner.run_pipeline(
-                dot_path=spec.dot,
-                wiki_dir=wiki_dir,
-                subs=subs,
-                interviewer=interviewer,
-            )
-        )
         sys.exit(_print_result(spec.name.upper(), result))
 
     return click.command(name=spec.name, help=spec.summary)(_cmd)

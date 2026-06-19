@@ -1,14 +1,16 @@
 """Amplifier tool module: wiki-attractor commands as mountable tools.
 
 Registers 6 tools — one per wiki-attractor command — that an AmplifierSession
-agent can invoke. Each tool is a thin wrapper:
+agent can invoke. Each tool is a thin wrapper that calls the bespoke
+wiki_attractor API (wiki_attractor.ingest, .query, .lint, etc.) and converts
+the result to a ToolResult.
 
-  tool.execute(input_data)
-    → calls wiki_attractor.runner.run_pipeline(dot_path, wiki_dir, subs, ...)
-    → returns ToolResult(success=..., output=<answer/status>)
+    tool.execute(input_data)
+      → calls wiki_attractor.<name>(wiki_dir, ...)  (the bespoke API function)
+      → returns ToolResult(success=..., output=<answer/status>)
 
 All real work lives in the .dot files (inside wiki_attractor/pipelines/).
-This module adds NO logic beyond mapping tool arguments to run_pipeline args.
+This module adds NO logic beyond mapping tool arguments to API calls.
 
 The Iron Law (creating-amplifier-modules skill): mount() MUST call
 coordinator.mount() for each tool, or protocol_compliance validation fails.
@@ -17,45 +19,22 @@ coordinator.mount() for each tool, or protocol_compliance validation fails.
 from __future__ import annotations
 
 import logging
-import sys
-from pathlib import Path
 from typing import Any
 
 from amplifier_core import ToolResult
 
-# wiki_attractor is the companion package (installed editably in the same venv).
-from wiki_attractor import runner
-from wiki_attractor.registry import REGISTRY
+import wiki_attractor
 
 logger = logging.getLogger(__name__)
 
-_PKG = Path(__file__).resolve().parent
-
-# Paths the review pipeline needs substituted into the DOT.
-_WIKI_ATTRACTOR_PKG = Path(runner.__file__).resolve().parent
-_REVIEW_HELPER = _WIKI_ATTRACTOR_PKG / "review_queue.py"
-
 
 # ---------------------------------------------------------------------------
-# Shared thin helper — the ONLY logic in this module.
+# Shared thin helper — convert an api result dict to a ToolResult.
 # ---------------------------------------------------------------------------
 
 
-async def _run(spec_name: str, wiki_dir: str, subs: dict[str, str] | None = None,
-               *, output_file: str | None = None, interviewer: Any | None = None) -> ToolResult:
-    """Call run_pipeline for the named spec and return a ToolResult.
-
-    This is the one shared helper that all 6 tool classes call. It directly
-    awaits runner.run_pipeline so there is no nested asyncio.run().
-    """
-    spec = REGISTRY[spec_name]
-    result = await runner.run_pipeline(
-        dot_path=spec.dot,
-        wiki_dir=Path(wiki_dir).resolve(),
-        subs=subs,
-        interviewer=interviewer,
-        output_file=output_file if output_file is not None else spec.output_file,
-    )
+def _to_tool_result(result: dict[str, Any]) -> ToolResult:
+    """Convert an api result dict to a ToolResult."""
     status = result.get("status", "unknown")
     success = status in ("success", "completed")
     output = result.get("output") or result.get("notes") or str(result)
@@ -63,7 +42,7 @@ async def _run(spec_name: str, wiki_dir: str, subs: dict[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
-# Tool classes — one per command. Each is 3-8 lines of real code.
+# Tool classes — one per command.
 # ---------------------------------------------------------------------------
 
 
@@ -101,11 +80,13 @@ class WikiIngestTool:
         }
 
     async def execute(self, input_data: dict[str, Any]) -> ToolResult:
-        return await _run(
-            "ingest",
-            input_data["wiki_dir"],
-            subs={"$source": input_data["source"]},
-        )
+        try:
+            result = await wiki_attractor.ingest(
+                input_data["wiki_dir"], input_data["source"]
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, output=str(exc))
+        return _to_tool_result(result)
 
 
 class WikiQueryTool:
@@ -142,11 +123,13 @@ class WikiQueryTool:
         }
 
     async def execute(self, input_data: dict[str, Any]) -> ToolResult:
-        return await _run(
-            "query",
-            input_data["wiki_dir"],
-            subs={"$question": input_data["question"]},
-        )
+        try:
+            result = await wiki_attractor.query(
+                input_data["wiki_dir"], input_data["question"]
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, output=str(exc))
+        return _to_tool_result(result)
 
 
 class WikiLintTool:
@@ -179,7 +162,11 @@ class WikiLintTool:
         }
 
     async def execute(self, input_data: dict[str, Any]) -> ToolResult:
-        return await _run("lint", input_data["wiki_dir"])
+        try:
+            result = await wiki_attractor.lint(input_data["wiki_dir"])
+        except ValueError as exc:
+            return ToolResult(success=False, output=str(exc))
+        return _to_tool_result(result)
 
 
 class WikiPublishTool:
@@ -211,7 +198,11 @@ class WikiPublishTool:
         }
 
     async def execute(self, input_data: dict[str, Any]) -> ToolResult:
-        return await _run("publish", input_data["wiki_dir"])
+        try:
+            result = await wiki_attractor.publish(input_data["wiki_dir"])
+        except ValueError as exc:
+            return ToolResult(success=False, output=str(exc))
+        return _to_tool_result(result)
 
 
 class WikiInitTool:
@@ -253,14 +244,15 @@ class WikiInitTool:
         }
 
     async def execute(self, input_data: dict[str, Any]) -> ToolResult:
-        from wiki_attractor.registry import ASSETS_DIR  # noqa: PLC0415
-
-        subs = {
-            "$package": input_data["package"],
-            "$brief": input_data["brief"],
-            "$ASSETS": str(ASSETS_DIR.resolve()),
-        }
-        return await _run("init", input_data["wiki_dir"], subs=subs)
+        try:
+            result = await wiki_attractor.init(
+                input_data["wiki_dir"],
+                input_data["package"],
+                input_data["brief"],
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, output=str(exc))
+        return _to_tool_result(result)
 
 
 class WikiReviewTool:
@@ -302,42 +294,25 @@ class WikiReviewTool:
         }
 
     async def execute(self, input_data: dict[str, Any]) -> ToolResult:
-        import json  # noqa: PLC0415
-
         from amplifier_module_loop_pipeline.interviewer import (  # noqa: PLC0415
             Answer,
             QueueInterviewer,
         )
 
-        wiki_dir = Path(input_data["wiki_dir"]).resolve()
-
-        # Determine queue length to build a full-length auto-confirm list if needed.
-        queue_path = wiki_dir / "team-knowledge" / "flag-queue.json"
-        if not queue_path.exists():
-            return ToolResult(
-                success=False,
-                output=(
-                    "flag-queue.json not found. Run wiki_ingest first so the "
-                    "provenance audit node emits the queue."
-                ),
-            )
-
-        try:
-            queue = json.loads(queue_path.read_text())
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(success=False, output=f"Could not read flag-queue.json: {exc}")
-
         decisions_str = input_data.get("decisions", "")
         if decisions_str:
             picks = [d.strip().upper() for d in decisions_str.split(",") if d.strip()]
+            interviewer: Any = QueueInterviewer([Answer(value=d) for d in picks])
         else:
-            # Default: confirm all (keep every TODO-VERIFY flag — the safe headless choice).
-            picks = ["C"] * len(queue)
+            interviewer = None  # api.review() will auto-confirm all items
 
-        interviewer = QueueInterviewer([Answer(value=d) for d in picks])
-        subs = {"$PYBIN": sys.executable, "$HELPER": str(_REVIEW_HELPER)}
-
-        return await _run("review", str(wiki_dir), subs=subs, interviewer=interviewer)
+        try:
+            result = await wiki_attractor.review(
+                input_data["wiki_dir"], interviewer=interviewer
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, output=str(exc))
+        return _to_tool_result(result)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +330,9 @@ _TOOLS = [
 ]
 
 
-async def mount(coordinator: Any, config: dict[str, Any] | None = None) -> dict[str, Any]:
+async def mount(
+    coordinator: Any, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Mount all 6 wiki tools into the coordinator.
 
     Satisfies the Iron Law: calls coordinator.mount() for each tool.
