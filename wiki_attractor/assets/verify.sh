@@ -193,6 +193,31 @@ for tdir in ("outcomes", "concepts"):
                 f"({'; '.join(markers)}) - downgrade to 'working' or remove the claim"
             )
 
+# --- escape-sequence check: JSON unicode escapes (\\uXXXX) in markdown files are a
+#     serialization bug — the LLM wrote JSON-encoded content into plain UTF-8 markdown.
+#     Scan ALL .md files (entity + backbone) since backbone pages are also affected.
+#     Code blocks (``` fences and inline `code`) are exempt to avoid false-positives on
+#     documentation that legitimately discusses JSON escape syntax. ---
+import re as _re
+_ESCAPE_RE = _re.compile(r'\\u[0-9a-fA-F]{4}')
+_FENCE_RE  = _re.compile(r'```.*?```', _re.DOTALL)
+_INLINE_RE = _re.compile(r'`[^`\n]+`')
+for _path in sorted(glob.glob(os.path.join(wiki, "**", "*.md"), recursive=True)):
+    if os.path.basename(_path) in (".gitkeep",):
+        continue
+    with open(_path, encoding="utf-8") as _fh:
+        _raw = _fh.read()
+    _stripped = _FENCE_RE.sub("", _raw)
+    _stripped = _INLINE_RE.sub("", _stripped)
+    _hits = list(_ESCAPE_RE.finditer(_stripped))
+    if _hits:
+        _rel = os.path.relpath(_path, wiki)
+        _ctx = _stripped[max(0, _hits[0].start()-30):_hits[0].end()+30].replace("\n", " ").strip()
+        errors.append(
+            f"{_rel}: JSON unicode escape '{_hits[0].group()}' in markdown — "
+            f"write actual Unicode characters (e.g. \u2014 in source = em-dash —, not a JSON escape): ...{_ctx}..."
+        )
+
 if errors:
     for e in errors:
         print(f"ERROR: {e}")
