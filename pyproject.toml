@@ -19,8 +19,8 @@ dependencies = ["click>=8.1"]
 wiki-attractor = "wiki_attractor.cli:main"
 
 [tool.hatch.build.targets.wheel]
+# packages= ships ALL files under wiki_attractor/ (incl. pipelines/*.dot, profiles/*.yaml,
+# assets/*.sh) — not just .py. Do NOT add a force-include for those subdirs: it duplicates
+# what packages= already ships and makes `uv tool install` fail on a wheel-path collision
+# (the host's editable install never builds a wheel, so it hid this — the DTU caught it).
 packages = ["wiki_attractor"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"wiki_attractor/pipelines" = "wiki_attractor/pipelines"
-"wiki_attractor/profiles" = "wiki_attractor/profiles"
