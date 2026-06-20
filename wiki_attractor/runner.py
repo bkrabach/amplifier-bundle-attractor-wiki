@@ -68,6 +68,15 @@ def _register_spawn_capability(session: Any, prepared: Any) -> None:
     from amplifier_foundation import Bundle, load_bundle
     from amplifier_foundation.spawn_utils import ProviderPreference
 
+    # Memoize resolved child bundles by ref string — one load per unique ref per
+    # run_pipeline call. Avoids repeated round-trips to the foundation registry
+    # for the same profile file across all box nodes in one pipeline run.
+    # The single-bundle-ref branch ("bundle" key, len==1) is the hot path: our
+    # wiki-agent profile is the same on every node, so MISS happens only once;
+    # subsequent nodes get HIT from this per-run cache.
+    # The multi-key Bundle(...) construction path is left unchanged.
+    _bundle_cache: dict[str, Any] = {}
+
     async def spawn_capability(
         agent_name: str,
         instruction: str,
@@ -97,7 +106,9 @@ def _register_spawn_capability(session: Any, prepared: Any) -> None:
                     "git+https://github.com/microsoft/amplifier-bundle-attractor@main"
                     f"#subdirectory={sub}.yaml"
                 )
-            child_bundle = await load_bundle(ref)
+            if ref not in _bundle_cache:
+                _bundle_cache[ref] = await load_bundle(ref)  # cached per run; fail loud
+            child_bundle = _bundle_cache[ref]
         else:
             child_bundle = Bundle(
                 name=agent_name,
