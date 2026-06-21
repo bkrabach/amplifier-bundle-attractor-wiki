@@ -50,7 +50,7 @@ The Karpathy operations map directly onto our commands:
 
 | Operation | Command | What it does |
 |---|---|---|
-| **Ingest** | `ingest <source>` | mine a source from `raw/` → write/update pages → reconcile (dedup/orphan-heal) → provenance audit → verify. Touches many pages per source. |
+| **Ingest** | `ingest <source>` | mine a source from `raw/` → write/update pages → verify → reconcile (dedup/orphan-heal) → provenance audit → **weave** (new grounded connections) → second review → verify. Touches many pages per source. |
 | **Lint** | `lint` | read-only health check: runs `verify.sh`, then surfaces contradictions / stale claims / orphans / concept gaps → `.wiki/lint-report.md`. |
 | **Publish** | `publish` | zips the wiki package to `.wiki/dist/` via `.wiki/scripts/publish.sh` (deterministic, no LLM). |
 | **Query** | `query <question>` | read-only, **index-first** Q&A with citations. Writes its cited answer to `.wiki/query-answer.md`; CLI/tool return it as `result["output"]`. Never touches the wiki package. |
@@ -65,6 +65,14 @@ Everything domain-specific — entity types, frontmatter, the `status: settled|w
 discipline, cross-ref conventions — is the **per-project contract** in
 **`.wiki/context/schema.md`**. The pipelines read it at runtime; they ship no policy of
 their own. To change how *your* wiki is structured, edit the schema, not the dots.
+
+**Performance tradeoff (L3, honest):** The reconcile, provenance-audit, weave, and second-review
+phases are all *scoped* to the pages this ingest changed (not the whole wiki). This keeps unattended
+ingest affordable (~12 min/source vs the whole-wiki alternative) but deliberately accepts that
+global semantic consistency — cross-ingest duplicate detection, whole-wiki provenance, and the
+full connections graph — degrades between runs. A periodic `lint` pass (or a full-wiki ingest run)
+closes the gap. **Scoped ≠ surgical.** It's a deliberate speed/fidelity tradeoff, not a fidelity
+virtue.
 
 ---
 

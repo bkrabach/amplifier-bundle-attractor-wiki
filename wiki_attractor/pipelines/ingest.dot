@@ -1,21 +1,29 @@
 // wiki-ingest pipeline — the attractor re-expression of /wiki-ingest.
 //
-// Runs under the wiki-agent-anthropic child profile (attractor tools + llm-wiki
-// orientation composed in). The LOAD-BEARING schema/scripts are project-side in
-// .wiki/ and reached by the box nodes' filesystem tools (proven in seam-1); the
-// orientation "why" lens is composed into the agent (proven in seam-2).
+// Runs under the wiki-agent-anthropic child profile. The LOAD-BEARING schema/scripts
+// are project-side in .wiki/ and reached by the box nodes' filesystem tools.
 //
 // Node-type discipline (attractor conventions):
 //   parallelogram = deterministic shell (route on EXIT CODE, never LLM text)
 //   box (default) = LLM agent node (judgment / content generation)
 //   diamond       = pure router
 //
-// STATUS: write→verify loop PROVEN green end-to-end (mines a source, writes
-// interlinked pages, passes verify.sh). This revision adds a RECONCILE pass
-// (whole-wiki dedup-merge + orphan-heal) gated by the HARDENED verify.sh, to
-// close the A/B finding: headless single-source ingest filed the same entity
-// twice across runs (aios.md + agentic-os.md, one orphaned) because nothing did
-// the cross-ingest reconciliation a human diff-review supplies.
+// Pipeline phases (in order):
+//   mine → write_pages → verify → reconcile → provenance_audit → weave → review → verify2 → archive
+//
+// L3 PERFORMANCE TRADEOFF (honest, not a fidelity virtue): reconcile,
+// provenance_audit, weave, and review are all SCOPED to the changed-page
+// neighborhood for speed. This deliberately accepts that global semantic
+// consistency — cross-ingest duplicate detection, whole-wiki provenance, the
+// full connections graph — degrades between runs. Karpathy's pattern calls for
+// the LLM to scan the whole graph each pass; we DEFER that to a periodic /lint
+// or full-pass run to keep unattended ingest affordable. SCOPED ≠ SURGICAL.
+//
+// WEAVE is the Memex connections layer: generates new grounded associative
+// trails between distinct, already-correct pages — connections no source stated
+// but genuinely implied by claims already on the pages. Spike-proven on the
+// real 33-page wiki: 8/10 grounded non-obvious connections, 0 hallucinations.
+// This is the difference between a filing cabinet and a compounding knowledge base.
 
 digraph WikiIngest {
     graph [
@@ -54,43 +62,52 @@ digraph WikiIngest {
     ]
     verify_gate [shape=diamond]
 
-    // Step 5 — RECONCILE the changed neighborhood (LLM, L3-SCOPED): the cross-ingest
-    // pass a human diff-review used to supply. Scoped to pages this ingest touched plus
-    // same-type title check (cheap dup guard) plus inbound link-neighbors. verify.sh runs
-    // immediately after as the whole-wiki structural safety net (catches ALL dup-titles
-    // and orphans deterministically) — trust it. This node handles the SEMANTIC judgment
-    // verify.sh cannot make.
+    // Step 5 — RECONCILE the changed neighborhood (LLM, L3-scoped for speed): the
+    // cross-ingest pass a human diff-review used to supply. Scoped to this ingest's
+    // changed pages + same-type title check + inbound link-neighbors. TRADEOFF: catches
+    // same-ingest conflicts; cross-ingest semantic consistency deferred to a full lint.
+    // verify.sh is the whole-wiki structural safety net (dup-titles, orphans).
     reconcile [
         llm_provider="anthropic",
         prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write — (em dash), not its JSON escape. Write \u201c and \u201d (curly quotes), not their JSON escapes. Write § (section sign), not its JSON escape. Write \u2019 (apostrophe), not its JSON escape. This rule applies even after reading flag-queue.json — JSON encoding is for .json files only, NEVER for .md files.\n\nReconcile only the neighborhood this ingest changed. verify.sh runs immediately after as the whole-wiki structural gate (it flags ALL duplicate titles and orphans across every page), so trust it as the global safety net. Your job is the semantic judgment verify.sh cannot make, scoped to what actually changed.\n\nDerive the changed-page set: run 'git status --short team-knowledge/' and collect the file paths (second field per line). Focus on entity pages in outcomes/, concepts/, people/, sources/ directories; backbone changes (overview.md, index.md) are secondary. If git status shows no changed entity pages, skip to step (4) and end with 'no reconciliation needed'.\n\n(1) SEMANTIC DUP RISK — new vs old: for each changed entity page, read its type and title from frontmatter. Then list ALL existing pages in the same entity-type directory (e.g. outcomes/ for an outcome page) and read their titles. If any existing page is semantically the same entity as a changed page under a different slug, MERGE: keep the richest/most-linked one, fold the other's unique content and sources[] in, repoint all [[wikilinks]] in the wiki to the canonical slug, delete the redundant file, fix index.md. Do not merge genuinely distinct entities.\n\n(2) INBOUND LINK NEIGHBORS: for each changed-page slug, search the wiki for pages that wikilink to it (search for [[ patterns containing the slug in team-knowledge/). Skim those neighbor pages for any loose cross-ref or dangling reference introduced by the new content. Fix real link-integrity issues only.\n\n(3) ORPHAN HEAL (changed pages only): if a changed entity page has zero inbound wikilinks from other pages, wire it in from a genuinely related page. Never fabricate relationships.\n\n(4) OPEN-QUESTIONS SCOPE EXPANSION — the semantic edge that wikilink-scope misses: read team-knowledge/open-questions.md. Collect every entity page named or [[wikilinked]] in the Tensions section (by slug or name). For each such page that is currently status: settled, re-read the tension text AND the page body. If the tension marks the entity as still-open, aspirational, or undecided — OR the page body\'s primary framing describes it as a direction the team is heading toward rather than an established fact acted on today — downgrade the page to status: working and ensure index.md reflects the change. Do NOT over-correct: only downgrade pages whose defining open question is in open-questions.md or whose body carries the aspiration signal; genuinely settled facts the team acts on today stay settled.\n\n(5) Update index.md for any merges or status changes. Append a one-line reconciliation note to log.md.\nEnd with a non-empty one-line summary ('no reconciliation needed' if nothing required)."
     ]
 
-    // Step 6 — Provenance + status audit (LLM, L3-SCOPED + RAW-AWARE): scoped to only
-    // the entity pages this ingest created or edited. Unchanged pages were each audited in
-    // their own ingest cycle — re-auditing them is wasted work. verify.sh is the structural
-    // floor; this node adds the semantic provenance + status honesty check on the changed set.
+    // Step 6 — Provenance + status audit (LLM, L3-scoped for speed): audits only the
+    // entity pages this ingest created or edited. TRADEOFF: cross-ingest status drift
+    // (a later source contradicting an earlier settled page) is only caught by a full
+    // lint pass, not here. verify.sh is the structural floor.
     provenance_audit [
         llm_provider="anthropic",
         prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write — (em dash), not its JSON escape. Write \u201c and \u201d (curly quotes), not their JSON escapes. Write § (section sign), not its JSON escape. Write \u2019 (apostrophe), not its JSON escape. This rule applies even after reading flag-queue.json — JSON encoding is for .json files only, NEVER for .md files.\n\nAudit provenance + status honesty for ONLY the entity pages this ingest created or edited. Unchanged pages were each audited in their own ingest cycle — re-auditing them wastes time. Derive the changed-page set: run 'git status --short team-knowledge/' and collect the file paths. Focus on entity pages (outcomes/, concepts/, people/, sources/ directories). If the changed set has no entity pages, end with 'provenance: nothing to audit'.\n\nFor EACH changed entity page, RAW-AWARE:\n(1) Identify cited sources from sources[] frontmatter and any [[sources/...]] links. For each, open (a) team-knowledge/sources/<slug>.md and (b) the raw input it summarizes — the raw filename is noted on the source page's provenance line; find it in raw/ (current ingest) or raw/archive/ (prior ingests). If the raw file cannot be found, note it and treat raw as unavailable for that source.\n(2) For each load-bearing claim on the entity page, classify:\n   IN THE RAW BUT MISSING FROM THE SOURCE PAGE: not an over-claim — the summary is lossy. Heal the source page by adding the supporting detail from the raw input. Do NOT add a TODO-VERIFY to the entity page.\n   IN NEITHER the source page nor the raw: a true over-claim. Add '> TODO-VERIFY: <claim> — not found in cited source or raw input' right at that claim. If the page is status: settled, downgrade it to working (an analogy, forward projection, or still-maturing outcome should be 'working').\n   IN EITHER: fine, leave it.\n(3) Apply uniformly — quiet concept pages need the same rigor as spine outcomes.\n(4) Append a one-line note to log.md naming healed vs flagged counts.\n\n(STATUS RE-VALIDATION — scoped, load-bearing): The schema contract is the anchor: settled = a decided bet / established fact the team is acting on right now; working = a live framing or active direction, not yet locked. For EACH changed entity page in outcomes/ or concepts/ that has status: settled (or that you are considering promoting to settled): downgrade to working if EITHER of these conditions holds:\\n  (1) OPEN-QUESTIONS CHECK: read open-questions.md and check whether this entity (by name, title, or slug) appears in any tension listed there. If it does — even partially — the page MUST be status: working. A page whose defining question is open in open-questions.md is by definition not settled.\\n  (2) PAGE-BODY SIGNAL: read the page's own body text. If the body's primary framing describes this as a direction the team is *heading toward* rather than an established fact the team is *acting on today* — signals include: "north-star", "destination", "heading toward", "the future the team is heading", "new frontier", "aspiration", "not yet a shipped/owned/fully-specified bet", or the entity describes a future state with no owning project or product — the page MUST be status: working. The schema test: "Is the team acting on this as a decided bet today?" If the page says "this is where we're going" rather than "this is what we are doing", it is working, not settled.\\n(3) OPEN-QUESTIONS SCOPE EXPANSION — the cross-ingest semantic edge: even for entity pages NOT in this ingest\'s git-status changed set, if the entity (by name, title, or slug) is referenced in a tension in team-knowledge/open-questions.md, read that tension AND the entity page. If the tension indicates the entity is still open, aspirational, or undecided — the page MUST be status: working. This catches the case where a later ingest writes an open-questions tension naming an earlier settled page (that page falls outside changed-page scope but is now named as unresolved in open-questions).\\\\nDo NOT over-correct: only apply this to pages that are named in a tension that specifically flags them as open; genuinely settled bets the team acts on today stay settled.\nDo NOT over-correct on conditions (1)–(3): core bets they are executing against today (e.g. compounding-stack, disruption-from-within, commodity-thesis) stay settled even if mentioned in passing in open-questions. Judge the *primary framing* of the tension, not incidental mentions. Downgrade if any condition holds; never promote a page to settled if any condition fires.\n\n(CROSS-SOURCE CONTRADICTION CHECK — bounded): for each entity page created or touched by this ingest, check its cited sources[] against other source pages already in team-knowledge/sources/ that also reference the same entity (search for [[entity-slug]] or entity name in other source pages). If two sources make contradictory claims about the same entity — e.g. one frames it as a durable moat and another as table-stakes, one frames it as settled and another as open — add a real entry to the \'## Contradictions surfaced\' section of open-questions.md. Replace the HTML comment placeholder if it is the only content. Each entry: the two claims, their source slugs, a plain-English statement of the conflict, and that human adjudication is needed. This is bounded by the entities the new source discusses, NOT a full re-read of every page. If no contradictions are found, leave open-questions.md unchanged.\nEnd with a non-empty one-line summary."
     ]
 
-    // Step 7 — Second reviewer (LLM, L3-SCOPED): automated adjudication BEFORE any human,
-    // fully non-blocking. Scoped to TODO-VERIFY flags on the changed pages only — prior
-    // ingests' flags are already in flag-queue.json and do NOT need re-processing. Preserves
-    // existing queue entries and appends this ingest's contribution.
+    // Step 7 — WEAVE the connections layer (LLM, scoped outward from seeds): the Memex
+    // associative-trail phase. Generates NEW grounded associative trails between DISTINCT,
+    // already-correct entity pages — connections no source stated but genuinely implied by
+    // claims already on the pages. ADDS connections only; never deletes, never touches status.
+    // Spike-proven: 8/10 grounded non-obvious connections, 0 hallucinations on real 33-page wiki.
+    // Weave ≠ reconcile: reconcile resolves/merges/deduplicates; weave generates new trails.
+    weave [
+        llm_provider="anthropic",
+        prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write \u2014 (em dash), not its JSON escape. Write \\u201c and \\u201d (curly quotes), not their JSON escapes. Write \u00a7 (section sign), not its JSON escape. Write \\u2019 (apostrophe), not its JSON escape. This rule applies even after reading flag-queue.json \u2014 JSON encoding is for .json files only, NEVER for .md files.\n\nYou are the WEAVE stage of the ingest pipeline. Your job is to GENERATE new grounded associative trails between DISTINCT, already-correct entity pages \u2014 connections no source document stated but that are genuinely implied by claims already on the pages. You ADD connections only; you do NOT delete content, reorder pages, or change status fields (reconcile and provenance_audit handle those).\n\nSCOPE: Run 'git status --short team-knowledge/' and collect the changed entity-page paths (outcomes/, concepts/, people/, sources/ dirs). These are your SEED pages. Read each seed page plus index.md. Identify CANDIDATE pages from the catalog \u2014 existing pages whose one-liner suggests a possible relationship to the seed content. Read only the seeds and your candidates (\u226410 pages total). Do NOT re-read the whole wiki.\n\nIf no entity pages changed (only backbone pages in git status), end immediately with: 'weave: no entity seeds \u2014 no connections generated.'\n\nTARGET \u2014 3 HIGH-VALUE PATTERNS ONLY (these produce grounded results; generic 'connections' do not):\n(1) STRENGTH-AS-CONSTRAINT REFRAMES: seed page A asserts a strength or capability; candidate page B reveals that same strength is gated, capped, or conditional. The connection: A's strength holds unless/until B's condition applies.\n(2) CROSS-PAGE TENSIONS: seed page A and candidate page B seem to pull in opposite directions. Record the synthesis discipline that holds both \u2014 not a verdict, not a contradiction to resolve.\n(3) PERSON<->CONCEPT DUALITIES: a person page's lived framing IS the concrete definition or most grounded operational example of an abstract concept page, or mirrors it.\n\nFor each candidate connection, apply BOTH gates before recording:\n\nGATE 1 \u2014 GROUNDING: State the relationship using ONLY claims already on page A AND claims already on page B, each already source-traced. If the connection requires any fact NOT already on either page \u2014 it is FABRICATION \u2014 DROP IT. Connections get NO new sources[] entries.\n\nGATE 2 \u2014 VALUE: Would a careful reader who had already read BOTH pages individually see this connection? If yes \u2014 TRIVIAL \u2014 skip it. Record only what neither page makes obvious alone.\n\nMECHANICAL DEDUP (non-optional \u2014 do NOT rely on recall): Before recording any connection as new, use your search/grep tool to check whether the two pages already link to each other. Search page-A's content for page-B's slug, and search page-B's content for page-A's slug. If EITHER already references the other in any [[wikilink]], the connection is ALREADY RECORDED \u2014 skip it entirely.\n\nRECORDING \u2014 use the cheapest form that fits:\n- INLINE WIKILINK: if natural prose on the page already touches the connected concept, add a [[wikilink]] inline where it fits.\n- SEE-ALSO NOTE (the default form): add a '## See also' section (or append to an existing one) with one sentence explaining WHY this connection matters. BIDIRECTIONAL \u2014 add the reciprocal note on the other page too.\n- SYNTHESIS PAGE (rare, highest fabrication risk): ONLY if the SAME cross-cutting relationship recurs across >=2 grounded page pairs AND deserves a named concept of its own. If created: status: working (NEVER settled), [[wikilink]] back to the pages it ties, add a note in open-questions.md marking it speculative. When unsure, prefer a See-also note.\n- Update overview.md ONLY if a connection materially changes the one-story narrative. Note why if you do.\n\nAPPEND to log.md one line: '## [YYYY-MM-DD] weave | +N connections (M see-also, K synthesis pages)' or 'weave: no grounded connections found.'\n\nEnd with a non-empty one-line summary of what you found and recorded."
+    ]
+
+    // Step 8 — Second reviewer (LLM, L3-scoped for speed): automated adjudication BEFORE
+    // any human, fully non-blocking. Scoped to TODO-VERIFY flags on the changed pages only
+    // — prior ingests' flags are already in flag-queue.json. Preserves existing entries.
     review [
         llm_provider="anthropic",
         prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write — (em dash), not its JSON escape. Write \u201c and \u201d (curly quotes), not their JSON escapes. Write § (section sign), not its JSON escape. Write \u2019 (apostrophe), not its JSON escape. This rule applies even after reading flag-queue.json — JSON encoding is for .json files only, NEVER for .md files.\n\nYou are the independent second reviewer. Work ONLY from files on disk. Derive the changed-page set: run 'git status --short team-knowledge/' and collect the file paths (entity pages only). Find TODO-VERIFY flags ONLY on those changed pages — prior ingests' flags are already in flag-queue.json and do NOT need re-processing.\n\nFor EACH TODO-VERIFY flag found on a changed page:\n(1) Open the page, its cited source page (team-knowledge/sources/<slug>.md), and the raw input (raw/ or raw/archive/). Decide:\n   CONFIRM: the claim genuinely lacks support in both the source page and the raw — KEEP the TODO-VERIFY line.\n   CORRECT: the claim IS supported by the source page or the raw — REMOVE that '> TODO-VERIFY:' line from the page. Note why.\n   UNCERTAIN: inconclusive from the files alone — KEEP the flag and record for human.\n\n(2) Read the existing team-knowledge/flag-queue.json (use [] if absent or invalid). Preserve ALL existing entries unchanged (they belong to prior ingests). Add or update entries ONLY for this ingest's changed-page flags that remain after your CORRECT removals. Write the merged array as valid JSON to team-knowledge/flag-queue.json. Each new entry: {\"page\": \"<path under team-knowledge/>\", \"claim\": \"<flagged claim text>\", \"cited_source\": \"<source slug>\", \"raw_source\": \"<raw filename or null>\", \"reviewer_note\": \"<why human review needed>\", \"status\": \"open\"}.\n\n(3) Append to log.md: 'review: confirmed X, corrected Y over-cautious flags, queued Z for human'.\nEnd with a non-empty one-line summary naming X, Y, Z."
     ]
 
-    // Step 8 — Verify again under the hardened gate (catches dup-titles + orphans).
+    // Step 9 — Verify again under the hardened gate (catches dup-titles + orphans).
     verify2 [
         shape=parallelogram,
         tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-verify2.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-verify2.out && printf clean || printf dirty"
     ]
     verify2_gate [shape=diamond]
 
-    // Step 7 — Archive the ingested source (deterministic).
+    // Step 10 — Archive the ingested source (deterministic).
     archive [
         shape=parallelogram,
         tool_command="mkdir -p raw/archive && mv raw/$source raw/archive/ && printf archived"
@@ -105,7 +122,8 @@ digraph WikiIngest {
     verify_gate -> reconcile   [condition="context.tool.last_line=clean", weight=10]
     verify_gate -> write_pages [condition="context.tool.last_line=dirty", weight=5]
     reconcile -> provenance_audit
-    provenance_audit -> review
+    provenance_audit -> weave
+    weave -> review
     review -> verify2
     verify2 -> verify2_gate
     verify2_gate -> archive    [condition="context.tool.last_line=clean", weight=10]
