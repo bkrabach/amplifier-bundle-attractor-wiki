@@ -30,8 +30,8 @@ ASSETS_DIR = _PKG / "assets"
 class CliArg:
     """A positional CLI argument injected into the DOT as a $placeholder."""
 
-    name: str          # click argument name, e.g. "source"
-    placeholder: str   # DOT token replaced with the value, e.g. "$source"
+    name: str  # click argument name, e.g. "source"
+    placeholder: str  # DOT token replaced with the value, e.g. "$source"
     help: str
 
 
@@ -39,7 +39,7 @@ class CliArg:
 class PipelineSpec:
     name: str
     dot: Path
-    executor: str      # "session" | "engine"
+    executor: str  # "session" | "engine"
     summary: str
     args: tuple[CliArg, ...] = field(default_factory=tuple)
 
@@ -135,5 +135,16 @@ REGISTRY: dict[str, PipelineSpec] = {
                 help="One-line domain brief for the wiki (e.g. 'product team strategy KB').",
             ),
         ),
+    ),
+    "full-pass": PipelineSpec(
+        name="full-pass",
+        dot=PIPELINES_DIR / "full-pass.dot",
+        executor="session",
+        summary=(
+            "Periodic whole-wiki global pass: reconcile cross-ingest duplicates, "
+            "re-audit status drift, and weave OLD-TO-OLD Memex connections. "
+            "Completes the work L3 per-ingest scoping defers."
+        ),
+        output_file=".wiki/full-pass-report.md",
     ),
 }

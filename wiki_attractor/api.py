@@ -150,6 +150,29 @@ async def init(wiki_dir: str | Path, package: str, brief: str) -> dict[str, Any]
     return await run_pipeline(spec.dot, wiki_dir, subs=subs)
 
 
+async def full_pass(wiki_dir: str | Path) -> dict[str, Any]:
+    """Run a periodic whole-wiki global pass.
+
+    Performs three whole-wiki phases the per-ingest L3-scoped pipeline defers:
+      1. **full_reconcile** — cross-ingest dedup/merge, type enforcement, orphan heal.
+      2. **full_provenance** — status drift re-audit and cross-ingest contradiction scan.
+      3. **full_weave** — OLD-TO-OLD Memex connections between pages that were never
+         in the same per-ingest changed-neighborhood.
+
+    The pass MODIFIES the wiki (adds/merges pages, adds wikilinks, writes
+    .wiki/full-pass-report.md).  Run periodically after every ~5-10 ingests
+    or after a major expansion.
+
+    Returns the pipeline result dict.  ``result["output"]`` contains the
+    full-pass report written by the full_weave node.
+
+    Raises ValueError if wiki_dir is not an initialized wiki.
+    """
+    wiki_dir = _check_wiki(wiki_dir)
+    spec = REGISTRY["full-pass"]
+    return await run_pipeline(spec.dot, wiki_dir, output_file=spec.output_file)
+
+
 async def review(
     wiki_dir: str | Path,
     *,

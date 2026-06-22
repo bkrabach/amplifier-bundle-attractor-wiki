@@ -1,0 +1,87 @@
+// wiki-attractor full-pass pipeline -- the periodic whole-wiki global scan.
+//
+// Counterpart to the per-ingest scoped phases. Per-ingest L3 scoping defers
+// three things to keep unattended ingest affordable:
+//   - cross-ingest semantic duplicates (same entity under different slugs/types,
+//     never in the same changed-neighborhood)
+//   - status drift on old pages (a later source makes a settled claim working)
+//   - OLD-TO-OLD connections: trails between pages BOTH already present before
+//     some later ingest, never together in any per-ingest changed-neighborhood
+//
+// This pipeline catches all three. Run periodically (~every 5-10 ingests) or
+// on demand after a major expansion. Does NOT ingest new sources.
+//
+// Three whole-wiki phases (NO git-status scoping -- that is the whole point):
+//   full_reconcile  -- dedup/merge + type enforcement + orphan heal, ALL pages
+//   full_provenance -- status re-audit + cross-ingest contradiction, ALL pages
+//   full_weave      -- global OLD-TO-OLD connections pass, all-pages all-pairs
+//
+// Ends with verify.sh (structural floor: broken links, dup titles, orphans,
+// escape-sequence corruption). Loops back to full_reconcile on dirty.
+//
+// KNOWN SCALING CLIFF: whole-wiki LLM read won't fit context at ~200+ pages.
+// At that scale, fan-out into type-directory shards. Do not build that yet --
+// the single-pass version is correct and needed first.
+
+digraph WikiFullPass {
+    graph [
+        goal="Run a whole-wiki global pass: reconcile, provenance audit, and weave connections across all pages",
+        default_max_retry=3,
+        default_fidelity="full",
+        default_thread_id="wiki-full-pass"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Step 1 -- Orient (deterministic): verify this is an initialized wiki.
+    orient [
+        shape=parallelogram,
+        tool_command="test -f .wiki/context/schema.md && test -d team-knowledge && printf ready || printf uninitialized"
+    ]
+
+    // Step 2 -- Full Reconcile (LLM, WHOLE-WIKI): dedup/merge across ALL pages.
+    // Per-ingest reconcile is scoped to the changed-neighborhood; this pass sees
+    // everything and catches cross-ingest conflicts the scoped pass cannot.
+    full_reconcile [
+        llm_provider="anthropic",
+        prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write — (em dash), not \\u2014. Write curly quotes, not \\u201c or \\u201d. Write § (section sign), not \\u00a7. Write ' (apostrophe), not \\u2019. This rule applies even after reading .json files — JSON encoding is for .json files only, NEVER for .md files.\\n\\nYou are the FULL-WIKI RECONCILE pass — the periodic whole-wiki audit that per-ingest L3-scoped reconciliation deliberately defers. Do NOT use git status to scope your work. You process ALL entity pages across ALL four entity-type directories.\\n\\nRead .wiki/context/schema.md first (the authoritative type definitions). Then read index.md to get the full catalog. Then read ALL entity pages in outcomes/, concepts/, people/, sources/.\\n\\nPHASE 1 — CROSS-INGEST SEMANTIC DUPLICATES: Across all entity pages, find pages that represent the SAME real-world entity under different slugs or types (filed by different ingests that never shared a changed-neighborhood). Signs: very similar titles, same concept described differently, same person under a name variant. For genuine duplicates: keep the richer/more-linked page, fold the other's unique content and sources[] into it, repoint ALL [[wikilinks]] in the wiki to the canonical slug, delete the redundant file, fix index.md. Do NOT merge genuinely distinct entities that happen to be related.\\n\\nPHASE 2 — TYPE ENFORCEMENT: The schema defines canonical outcomes (Amplifier Agent, Amplifier Resolve, Team Pulse, AIOS, and any others named in the schema). If any canonical outcome landed in concepts/ (type: concept), move it to outcomes/ with type: outcome and repoint its wikilinks. If any page in people/ is a role archetype rather than a named real person from sources (e.g. 'conductor archetype', 'taste-maker archetype'), move it to concepts/ with type: concept.\\n\\nPHASE 3 — ORPHAN HEAL: Any entity page with ZERO inbound [[wikilinks]] from any other non-backbone page is at risk of becoming unfindable. For each orphan: find the 1-2 pages most naturally related to it and add a [[wikilink]] in appropriate prose. Prefer inline links over forced see-also entries.\\n\\nPHASE 4 — INDEX SYNC: Ensure index.md accurately reflects any slug, type, or status changes made in phases 1-3. Update any stale one-liners.\\n\\nAppend one line to log.md: '## [YYYY-MM-DD] full-reconcile | <concise summary of merges/moves/heals>'.\\nEnd your final message with a non-empty plain-text summary of all changes made (or 'full-reconcile: no changes needed' if the wiki is already clean)."
+    ]
+
+    // Step 3 -- Full Provenance (LLM, WHOLE-WIKI): status re-audit, all pages.
+    // Per-ingest provenance_audit is scoped to changed pages only; cross-ingest
+    // status drift (a later source contradicting an earlier settled page) is only
+    // caught here.
+    full_provenance [
+        llm_provider="anthropic",
+        prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write — (em dash), not \\u2014. Write curly quotes, not \\u201c or \\u201d. Write § (section sign), not \\u00a7. Write ' (apostrophe), not \\u2019. This rule applies even after reading .json files — JSON encoding is for .json files only, NEVER for .md files.\\n\\nYou are the FULL-WIKI PROVENANCE AND STATUS AUDIT — the periodic pass that catches status drift the per-ingest scoped audit cannot see. Do NOT use git status to scope your work. Process ALL entity pages.\\n\\nRead .wiki/context/schema.md (status definitions: settled=decided bet the team acts on today; working=live framing, not locked; unsettled=open). Read open-questions.md. Then read ALL entity pages in outcomes/, concepts/, people/, sources/.\\n\\nPHASE 1 — STATUS DRIFT AUDIT (all entity pages):\\nFor EACH entity page with status: settled, check whether the body contradicts the settled claim. Downgrade to working if ANY of: the body has a '## Working:' section; the body contains 'not yet decided', 'draft', 'still open', or 'heading toward'; open-questions.md Tensions section references this page/entity as unsettled; the page's primary framing describes a future destination rather than a fact acted on today. When downgrading: add '> STATUS NOTE: downgraded by full-provenance pass — body/tensions indicate this is still a live framing.' Update index.md for each changed status.\\n\\nPHASE 2 — CROSS-INGEST CONTRADICTION SCAN:\\nFor each source page (in sources/), identify all entity pages that cite it (sources[] frontmatter). For each citing entity: read both the entity page and the source page. If the source page's date is LATER than any EARLIER-dated source on the entity, and the later source contradicts a settled claim: either (a) add a '> CROSS-SOURCE CONTRADICTION: [[sources/<slug>]] contradicts this claim — see open-questions tension.' note and downgrade to working, or (b) file the contradiction under '## Contradictions surfaced' in open-questions.md with both sources named. Prefer (b) for high-visibility contradictions.\\n\\nPHASE 3 — OPEN-QUESTIONS SCOPE: For each entity referenced in open-questions.md Tensions section that is currently status: settled — cross-check: read the tension text. If the tension indicates the entity is still-open, aspirational, or undecided, downgrade the entity page to working.\\n\\nAppend one line to log.md: '## [YYYY-MM-DD] full-provenance | <concise summary of downgrades/contradictions>'.\\nEnd your final message with a non-empty plain-text summary (or 'full-provenance: no status drift found' if everything is already correct)."
+    ]
+
+    // Step 4 -- Full Weave (LLM, WHOLE-WIKI): global OLD-TO-OLD connections pass.
+    // The per-ingest weave operates outward from changed seeds -- so it can only
+    // ever connect recently-changed pages to their neighbors. Two pages BOTH already
+    // present for multiple ingests, never in the same changed-neighborhood, will
+    // NEVER be examined together by per-ingest weave. This pass closes that gap:
+    // it reads ALL pages and surfaces OLD-TO-OLD associative trails.
+    full_weave [
+        llm_provider="anthropic",
+        prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write — (em dash), not \\u2014. Write curly quotes, not \\u201c or \\u201d. Write § (section sign), not \\u00a7. Write ' (apostrophe), not \\u2019. This rule applies even after reading .json files — JSON encoding is for .json files only, NEVER for .md files.\\n\\nYou are the GLOBAL WEAVE pass — the periodic whole-wiki Memex connections pass. Where per-ingest weave operates outward from recently-changed seed pages (and therefore can only connect recently-touched pages to neighbors), you surface OLD-TO-OLD connections: trails between pages BOTH already present for multiple ingests, which only become visible in light of the accumulated full context. No per-ingest scoped weave ever examines these pairs together.\\n\\nRead index.md for the catalog. Then read ALL entity pages across outcomes/, concepts/, people/, sources/.\\n\\nFILTER OUT EXISTING CONNECTIONS: For each candidate pair (page_a, page_b), MECHANICALLY verify they are not already connected: grep for [[page_b_slug]] anywhere in page_a content AND grep for [[page_a_slug]] anywhere in page_b content. If EITHER direction already has a link, skip the pair — it is already connected. Do not rely on memory of the link graph; use the grep.\\n\\nTARGET — 3 HIGH-VALUE PATTERNS ONLY (these reliably produce grounded, non-obvious results):\\n(1) STRENGTH-AS-CONSTRAINT REFRAMES: page A asserts a strength or capability; page B reveals that same strength is gated, capped, or conditional on something. Connection: 'A's strength holds unless/until B's condition applies.'\\n(2) CROSS-PAGE TENSIONS: page A and page B seem to pull in opposite directions. Their combination reveals a synthesis discipline neither alone makes visible.\\n(3) PERSON<->CONCEPT DUALITY: a person page and a concept page are in a non-obvious origination or embodiment relationship — the person drove or embodies the concept in a way not explicitly stated in either page.\\n\\nGROUNDING TEST (non-negotiable for every connection you record): state it using ONLY claims already present on BOTH pages. 'Because [claim from page_a] and [claim from page_b], therefore [novel synthesis].' If you cannot state it this way, skip the connection. Do NOT add new sources[] entries. Do NOT import outside knowledge.\\n\\nVALUE TEST: Would a researcher who has read both pages individually be surprised by this connection? If the answer is obvious, skip.\\n\\nFOCUS ON OLD-TO-OLD: Prefer connections between pages that have been in the wiki since early ingests and whose relationship only becomes apparent once the full graph is visible. Avoid connecting pages that were ingested together in the same cycle (those would have been caught by per-ingest weave already).\\n\\nRECORDING (cheapest form first — stop at the first form that fits):\\n- Inline [[wikilink]] where it fits naturally in existing prose (preferred).\\n- Bidirectional '## See also' note on BOTH pages: '- [[other-slug]] — [one-sentence synthesis of the connection]' (use when no natural inline location).\\n- Overview.md thread if the connection is load-bearing for the narrative spine (rare; flag with 'TODO: REVIEW THIS WEAVE ADDITION' if unsure).\\n- Status: working synthesis page only for truly emergent cross-cutting insights (very rare; requires the connection to be non-obvious even after reading both pages and the one-sentence synthesis).\\n\\nTARGET: 4-10 new OLD-TO-OLD connections for a wiki of 15-50 pages. Quality over quantity.\\n\\nWrite a brief summary to .wiki/full-pass-report.md: list each connection added, the two pages connected, and the one-sentence synthesis. This file is the primary output of the full-pass and is read back by the caller.\\n\\nAppend one line to log.md: '## [YYYY-MM-DD] full-weave | +N OLD-TO-OLD connections: [brief list of page pairs]'.\\nEnd your final message with a non-empty plain-text summary (or 'full-weave: no new connections found' if none passed the grounding + value tests)."
+    ]
+
+    // Step 5 -- Verify (deterministic structural floor).
+    verify [
+        shape=parallelogram,
+        tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-full-pass-verify.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-full-pass-verify.out && printf clean || printf dirty"
+    ]
+    verify_gate [shape=diamond]
+
+    start -> orient
+    orient -> full_reconcile  [condition="context.tool.last_line=ready"]
+    orient -> done            [condition="context.tool.last_line=uninitialized"]
+    full_reconcile -> full_provenance
+    full_provenance -> full_weave
+    full_weave -> verify
+    verify -> verify_gate
+    verify_gate -> done           [condition="context.tool.last_line=clean", weight=10]
+    verify_gate -> full_reconcile [condition="context.tool.last_line=dirty",  weight=5]
+}
