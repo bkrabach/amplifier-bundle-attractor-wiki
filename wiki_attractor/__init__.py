@@ -2,9 +2,10 @@
 
 __version__ = "0.1.0"
 
-from .api import ingest, init, lint, publish, query, review
+from .api import full_pass, ingest, init, lint, publish, query, review
 
 __all__ = [
+    "full_pass",
     "ingest",
     "init",
     "lint",
