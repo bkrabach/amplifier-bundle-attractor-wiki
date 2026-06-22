@@ -320,6 +320,45 @@ class WikiReviewTool:
 # for every tool, or protocol_compliance validation fails.
 # ---------------------------------------------------------------------------
 
+
+class WikiApplyResolutionsTool:
+    """Apply resolutions from review-queue.json with a semantic gate."""
+
+    @property
+    def name(self) -> str:
+        return "wiki_apply_resolutions"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Apply resolutions from team-knowledge/review-queue.json to the wiki. "
+            "Processes items with kind 'nl_feedback', 'type_migration', or 'entailment_unsure'. "
+            "Each item is applied by an LLM, then a semantic gate verifies the full intent "
+            "was accomplished before sealing as 'applied'. Incomplete applies are set to "
+            "'applied_uncertain' rather than sealed. Idempotent: 'applied' items are skipped."
+        )
+
+    @property
+    def input_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "wiki_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the wiki repository root.",
+                },
+            },
+            "required": ["wiki_dir"],
+        }
+
+    async def execute(self, input_data: dict[str, Any]) -> ToolResult:
+        try:
+            result = await wiki_attractor.apply_resolutions(input_data["wiki_dir"])
+        except ValueError as exc:
+            return ToolResult(success=False, output=str(exc))
+        return _to_tool_result(result)
+
+
 _TOOLS = [
     WikiIngestTool(),
     WikiQueryTool(),
@@ -327,13 +366,14 @@ _TOOLS = [
     WikiPublishTool(),
     WikiInitTool(),
     WikiReviewTool(),
+    WikiApplyResolutionsTool(),
 ]
 
 
 async def mount(
     coordinator: Any, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Mount all 6 wiki tools into the coordinator.
+    """Mount all 7 wiki tools into the coordinator.
 
     Satisfies the Iron Law: calls coordinator.mount() for each tool.
     """

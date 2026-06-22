@@ -147,4 +147,14 @@ REGISTRY: dict[str, PipelineSpec] = {
         ),
         output_file=".wiki/full-pass-report.md",
     ),
+    "apply-resolutions": PipelineSpec(
+        name="apply-resolutions",
+        dot=PIPELINES_DIR / "apply-resolutions.dot",
+        executor="session",
+        summary=(
+            "Apply resolutions from team-knowledge/review-queue.json to the wiki. "
+            "Supports structured decisions (type_migration) and NL freetext feedback. "
+            "Semantic gate catches incomplete applies; idempotent re-runs skip sealed items."
+        ),
+    ),
 }

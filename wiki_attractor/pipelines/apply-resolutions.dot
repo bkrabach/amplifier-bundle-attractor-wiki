@@ -1,0 +1,136 @@
+// wiki-attractor apply-resolutions pipeline
+//
+// Applies resolutions from team-knowledge/review-queue.json to the wiki.
+// Resolutions are either structured decisions (type_migration, entailment_unsure)
+// or free-text NL feedback from a human or from the automated ingest review pass.
+//
+// SEMANTIC GATE (the council FAIL fix): a post-apply LLM spot-check verifies
+// that the apply accomplished the FULL intent of the resolution. A structurally
+// valid but semantically-incomplete apply (1 of 3 required pages changed;
+// verify.sh passes because no broken links) is caught and set to "applied_uncertain"
+// rather than sealed as "applied". This prevents a structurally-clean but
+// wrong-first-application from permanently closing an item.
+//
+// IDEMPOTENCY: items with status == "applied" are skipped by next_item.
+// Re-running the pipeline is safe; completed items are never double-applied.
+//
+// Queue contract (team-knowledge/review-queue.json items):
+//   id             stable sha256-derived idempotency key (kind|target|res[:50])[:16]
+//   kind           "nl_feedback" | "type_migration" | "entailment_unsure"
+//   status         "open" | "resolved" | "applied" | "applied_uncertain"
+//   target_pages   list of paths the resolution is expected to touch
+//   resolution     { decision: str OR freetext: str, note: str }
+//   applied        null | { at: iso8601, changed_pages: [str] }
+//
+// Graph:
+//   start -> next_item -> has_more
+//     has_more --EMPTY--> done
+//     has_more --ITEM--> apply -> apply_verify -> apply_gate1
+//       apply_gate1 --clean--> apply_semantic_check -> check_verdict -> apply_gate2
+//       apply_gate1 --dirty--> apply                          (structural retry)
+//       apply_gate2 --ok--------> mark_applied -> next_item
+//       apply_gate2 --uncertain--> requeue -> next_item
+
+digraph WikiApplyResolutions {
+    graph [
+        goal="Apply resolutions from team-knowledge/review-queue.json to the wiki",
+        default_max_retry=3,
+        default_fidelity="full",
+        default_thread_id="wiki-apply-resolutions"
+    ]
+
+    start [shape=Mdiamond]
+    done  [shape=Msquare]
+
+    // Step 1 -- Next item (deterministic): pop next actionable item from the queue.
+    // Skips status=="applied" (idempotency key) and "applied_uncertain" (needs human).
+    // Picks up status=="resolved" OR status=="open" with a non-empty resolution.
+    // Writes .wiki/apply-current.json with the item. Prints "ITEM" or "EMPTY".
+    next_item [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER next"
+    ]
+    has_more [shape=diamond]
+
+    // Step 2 -- Apply (LLM box): load ONLY the target_pages + wikilink neighbors
+    // where needed -- NEVER the whole wiki. Interprets the resolution (structured
+    // decision OR NL freetext) and makes the change faithfully.
+    // For type_migration: move entity page, set type frontmatter, leave redirect
+    // stub at old path, repoint [[wikilinks]], update index.md.
+    // For nl_feedback: make exactly the changes the freetext describes.
+    // Writes .wiki/apply-changes.txt (changed pages, one per line) and
+    // .wiki/apply-semantic-verdict.txt with placeholder "pending".
+    // Ends with: "Applied: <comma-separated changed pages>"
+    apply [
+        llm_provider="anthropic",
+        prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write \u2014 (em dash), not \\\\u2014. Write curly quotes, not \\\\u201c or \\\\u201d. Write \u00a7 (section sign), not \\\\u00a7. Write ' (apostrophe), not \\\\u2019. This rule applies even after reading .json files \u2014 JSON encoding is for .json files only, NEVER for .md files.\\\\n\\\\nYou are the APPLY stage of the wiki-attractor apply-resolutions pipeline. Apply ONE resolution from the review queue.\\\\n\\\\nSTEP 1 \u2014 Read the current item:\\\\nbash -c 'cat .wiki/apply-current.json'\\\\n\\\\nSTEP 2 \u2014 Read schema and ONLY the pages listed in target_pages (+ their direct [[wikilink]] neighbors if needed). Do NOT read the whole wiki. If a target page does not exist at the listed path, check for it at related paths.\\\\n\\\\nSTEP 3 \u2014 Apply the resolution faithfully. Use resolution.decision or resolution.freetext as the authoritative instruction:\\\\n\\\\n  TYPE_MIGRATION: (1) Move the entity page to the correct type directory (e.g. concepts/aios.md -> outcomes/aios.md). (2) Set the 'type' frontmatter to the correct value. (3) Leave a brief redirect stub at the old path, e.g. 'Moved to [[outcomes/aios]]. See that page.' (4) Find and repoint ALL [[wikilinks]] to the old slug across the wiki (grep all .md files, edit each that references the old path). (5) Update index.md to list the entity under the correct entity-type section heading.\\\\n\\\\n  NL_FEEDBACK: Read the freetext carefully. Apply exactly the changes it describes. If a change explicitly names a page, update it. If a change implies a page not in target_pages but clearly required by the freetext, update it and record it. Do not make changes the freetext does not describe.\\\\n\\\\n  SCOPE GUARD: If the change cannot be bounded to a known target set, STOP. Write 'scope_unbounded' as the only line in .wiki/apply-changes.txt and end with: scope_unbounded: <reason>. Do not apply anything partial.\\\\n\\\\nSTEP 4 \u2014 Write results:\\\\n  1. Write .wiki/apply-changes.txt with every file you edited or created (one path per line, relative to wiki root).\\\\n  2. Write 'pending' to .wiki/apply-semantic-verdict.txt.\\\\n\\\\nEnd your response with ONE final line: 'Applied: <comma-separated list of changed pages>'"
+    ]
+
+    // Step 3 -- Apply verify (deterministic structural floor).
+    // Runs verify.sh. "clean" = structural checks pass; "dirty" = errors found,
+    // cycle back to apply for structural retry.
+    apply_verify [
+        shape=parallelogram,
+        tool_command="bash .wiki/scripts/verify.sh >/tmp/wiki-apply-verify.out 2>&1 && grep -q 'verify: clean' /tmp/wiki-apply-verify.out && printf clean || printf dirty"
+    ]
+    apply_gate1 [shape=diamond]
+
+    // Step 4 -- Semantic check (LLM box): verifies the apply accomplished the
+    // FULL intent of the resolution. Reads ONLY the git-status-changed pages +
+    // the original resolution intent. Does NOT fix anything -- only judges.
+    // Writes .wiki/apply-semantic-verdict.txt with exactly:
+    //   "ok"  -- if complete and correct
+    //   "uncertain: <one-line reason>"  -- if incomplete or semantically wrong
+    // Ends with the verdict as its final response line.
+    apply_semantic_check [
+        llm_provider="anthropic",
+        prompt="MARKDOWN ENCODING RULE (non-negotiable): This wiki is plain UTF-8 markdown. When writing or editing ANY .md file, ALWAYS use actual Unicode characters and NEVER use JSON unicode escape sequences. Write \u2014 (em dash), not \\\\u2014. Write curly quotes, not \\\\u201c or \\\\u201d. Write \u00a7 (section sign), not \\\\u00a7. Write ' (apostrophe), not \\\\u2019. This rule applies even after reading .json files \u2014 JSON encoding is for .json files only, NEVER for .md files.\\\\n\\\\nYou are the SEMANTIC CHECK stage. You judge whether the apply accomplished the FULL intent. DO NOT fix anything.\\\\n\\\\nSTEP 1 \u2014 Read the original resolution intent:\\\\nbash -c 'cat .wiki/apply-current.json'\\\\n\\\\nSTEP 2 \u2014 Identify what actually changed:\\\\nbash -c 'git status --short team-knowledge/'\\\\nRead each changed file.\\\\n\\\\nSTEP 3 \u2014 Judge completeness and correctness:\\\\n  (a) Were ALL pages named or clearly implied by the resolution updated as described?\\\\n  (b) For type_migration: entity at correct path with correct type? index.md lists it under the correct section? old path has a redirect stub? ALL [[wikilinks]] across the wiki repointed to new path?\\\\n  (c) For nl_feedback: each specific change described was made? No pages mentioned in the freetext were skipped?\\\\n  (d) Any semantic damage: moved entity still reachable under wrong type in index.md; multi-page change only half-done; status field missed?\\\\n\\\\nSTEP 4 \u2014 Write the verdict to .wiki/apply-semantic-verdict.txt (OVERWRITE with exactly one of):\\\\n  ok\\\\n  uncertain: <one-line reason naming the specific unresolved issue>\\\\n\\\\nEnd your response with ONLY the verdict (no other text):\\\\n  ok\\\\n  OR\\\\n  uncertain: <reason>"
+    ]
+
+    // Step 4a -- Read verdict (deterministic): read the verdict word from
+    // .wiki/apply-semantic-verdict.txt. The verdict is "ok" or
+    // "uncertain: <reason>" -- strip the trailing colon so routing matches
+    // condition="ok" or condition="uncertain" cleanly.
+    check_verdict [
+        shape=parallelogram,
+        tool_command="head -1 .wiki/apply-semantic-verdict.txt 2>/dev/null | awk '{gsub(/:$/,\"\",$1); print $1}' || printf unknown"
+    ]
+    apply_gate2 [shape=diamond]
+
+    // Step 5a -- Mark applied: item is complete and semantically verified.
+    // Sets status="applied" + applied block in review-queue.json.
+    mark_applied [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER mark_applied"
+    ]
+
+    // Step 5b -- Requeue: apply was structurally clean but semantically incomplete.
+    // Sets status="applied_uncertain" with the semantic-check note appended to
+    // the resolution. Does NOT seal the item; leaves it for human review.
+    requeue [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER requeue"
+    ]
+
+    // ---------- Edges ----------
+
+    start -> next_item
+
+    next_item -> has_more
+    has_more -> done  [condition="context.tool.last_line=EMPTY", weight=10]
+    has_more -> apply [condition="context.tool.last_line=ITEM",  weight=5]
+
+    apply -> apply_verify
+    apply_verify -> apply_gate1
+    apply_gate1 -> apply_semantic_check [condition="context.tool.last_line=clean", weight=10]
+    apply_gate1 -> apply                [condition="context.tool.last_line=dirty",  weight=5]
+
+    apply_semantic_check -> check_verdict
+    check_verdict -> apply_gate2
+    apply_gate2 -> mark_applied [condition="context.tool.last_line=ok",       weight=10]
+    apply_gate2 -> requeue      [condition="context.tool.last_line=uncertain", weight=5]
+    apply_gate2 -> requeue      [condition="context.tool.last_line=unknown",   weight=3]
+
+    mark_applied -> next_item
+    requeue -> next_item
+}
