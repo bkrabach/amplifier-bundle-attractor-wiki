@@ -82,6 +82,7 @@ _COMMAND_DISPATCH: dict[str, Any] = {
     "publish": lambda wd, **kw: _api.publish(wd),
     "init": lambda wd, **kw: _api.init(wd, kw["package"], kw["brief"]),
     "full-pass": lambda wd, **kw: _api.full_pass(wd),
+    "apply-resolutions": lambda wd, **kw: _api.apply_resolutions(wd),
 }
 
 

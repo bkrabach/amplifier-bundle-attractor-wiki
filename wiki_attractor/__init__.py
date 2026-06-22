@@ -2,9 +2,19 @@
 
 __version__ = "0.1.0"
 
-from .api import full_pass, ingest, init, lint, publish, query, review
+from .api import (
+    apply_resolutions,
+    full_pass,
+    ingest,
+    init,
+    lint,
+    publish,
+    query,
+    review,
+)
 
 __all__ = [
+    "apply_resolutions",
     "full_pass",
     "ingest",
     "init",

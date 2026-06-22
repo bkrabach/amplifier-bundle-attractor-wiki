@@ -27,6 +27,7 @@ from .runner import run_pipeline
 
 _PKG = Path(__file__).resolve().parent
 _REVIEW_HELPER = _PKG / "review_queue.py"
+_APPLY_HELPER = _PKG / "apply_resolutions_queue.py"
 
 
 # ---------------------------------------------------------------------------
@@ -230,3 +231,31 @@ async def review(
         interviewer = QueueInterviewer([Answer(value="C") for _ in queue])
 
     return await run_pipeline(spec.dot, wiki_dir, subs=subs, interviewer=interviewer)
+
+
+async def apply_resolutions(wiki_dir: str | Path) -> dict[str, Any]:
+    """Apply resolutions from team-knowledge/review-queue.json to the wiki.
+
+    Processes every actionable item in the queue (status == "resolved" or
+    status == "open" with a non-empty resolution).  For each item:
+
+    1. **apply** (LLM) — loads only the item's target_pages and interprets the
+       resolution (structured decision OR NL freetext), making the change
+       faithfully (type migration, wikilink repointing, index update, etc.).
+    2. **apply_verify** — runs verify.sh; structural retry if dirty.
+    3. **apply_semantic_check** (LLM) — verifies the apply accomplished the
+       FULL intent of the resolution.  A structurally-valid but semantically-
+       incomplete apply (1 of 3 required pages changed; verify.sh passes) is
+       caught and set to ``applied_uncertain`` rather than sealed as ``applied``.
+
+    Items with ``status == "applied"`` are SKIPPED — re-running is idempotent.
+    Items routed to ``applied_uncertain`` need human review or re-resolution.
+
+    Returns the pipeline result dict.
+
+    Raises ValueError if wiki_dir is not an initialized wiki.
+    """
+    wiki_dir = _check_wiki(wiki_dir)
+    spec = REGISTRY["apply-resolutions"]
+    subs = {"$PYBIN": sys.executable, "$HELPER": str(_APPLY_HELPER)}
+    return await run_pipeline(spec.dot, wiki_dir, subs=subs)
