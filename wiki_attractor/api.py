@@ -17,7 +17,9 @@ Adding a 7th command:
 
 from __future__ import annotations
 
+import datetime
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -259,3 +261,147 @@ async def apply_resolutions(wiki_dir: str | Path) -> dict[str, Any]:
     spec = REGISTRY["apply-resolutions"]
     subs = {"$PYBIN": sys.executable, "$HELPER": str(_APPLY_HELPER)}
     return await run_pipeline(spec.dot, wiki_dir, subs=subs)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for query_save().
+# ---------------------------------------------------------------------------
+
+
+def _make_query_slug(question: str, save_as: str | None = None) -> str:
+    """Build a raw/ filename for a query-derived synthesis file."""
+    today = datetime.date.today().isoformat()
+    if save_as:
+        name = (
+            re.sub(r"[^a-z0-9-]", "-", save_as.lower().strip()).strip("-").rstrip(".md")
+        )
+        return f"{today}-query-{name}.md"
+    slug = re.sub(r"[^a-z0-9]+", "-", question.lower()).strip("-")
+    slug = slug[:60].rstrip("-")
+    return f"{today}-query-{slug}.md"
+
+
+def _make_query_title(question: str, save_as: str | None = None) -> str:
+    """Build a human-readable title for the saved query file."""
+    if save_as:
+        return save_as.replace("-", " ").title()
+    title = question.strip()[:100]
+    if not title.endswith("?"):
+        title = title.rstrip("?") + "?"
+    return title
+
+
+async def query_save(
+    wiki_dir: str | Path,
+    question: str,
+    *,
+    save_as: str | None = None,
+    run_ingest: bool = True,
+) -> dict[str, Any]:
+    """Answer a question, save the cited answer to raw/, and ingest it.
+
+    This is Karpathy's **compounding loop**: good query answers are filed back
+    as first-class wiki pages so future queries build on accumulated synthesis,
+    not just external sources.  Closing the loop in one command means every
+    query that surfaces real insight can compound into the wiki immediately.
+
+    The saved raw/ file is marked clearly as **query-derived synthesis** — not
+    an external document — so the wiki's provenance record stays honest.  The
+    ``source_type: query-derived-synthesis`` frontmatter flag and a prose
+    provenance comment both appear in the file so the ingest pipeline's
+    sources/ page records the origin faithfully.
+
+    Args:
+        wiki_dir:    Wiki repository root (must be an initialized wiki).
+        question:    The question to answer.
+        save_as:     Optional custom slug for the raw/ file, e.g. ``"1.5x-disruption-link"``.
+                     Default: auto-derived from the question text plus today's date.
+        run_ingest:  If ``True`` (default), ingest the saved file immediately
+                     — the full loop closes in one call.  Set ``False`` to
+                     write raw/ only; the file will be ingested on the next
+                     ``ingest()`` call.
+
+    Returns:
+        A dict with keys:
+          - ``status``: ``"success"`` if both query and ingest succeed
+            (``"partial"`` if query succeeded but ingest failed).
+          - ``query``:    the query pipeline result dict.
+          - ``raw_file``: absolute path to the saved raw/ file.
+          - ``ingest``:   the ingest pipeline result dict (only when run_ingest=True).
+
+    Raises ValueError if wiki_dir is not an initialized wiki.
+    """
+    wiki_dir = _check_wiki(wiki_dir)
+
+    # Step 1 — Run the query (read-only pass; answer lands in .wiki/query-answer.md)
+    query_result = await query(wiki_dir, question)
+    if query_result.get("status") not in ("success", "completed"):
+        return {
+            "status": query_result.get("status", "fail"),
+            "query": query_result,
+            "failure_reason": (
+                f"Query pipeline failed: {query_result.get('failure_reason', 'unknown')}"
+            ),
+        }
+
+    # Step 2 — Write the cited answer to raw/ with a query-derived provenance header.
+    answer_text = query_result.get("output", "")
+    slug = _make_query_slug(question, save_as)
+    raw_dir = wiki_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
+    raw_file = raw_dir / slug
+
+    today = datetime.date.today().isoformat()
+    title = _make_query_title(question, save_as)
+
+    # Escape any double-quotes in the question so the YAML frontmatter stays valid.
+    safe_question = question.replace('"', '\\"')
+    file_content = (
+        f"---\n"
+        f'title: "{title}"\n'
+        f"source_type: query-derived-synthesis\n"
+        f'source_question: "{safe_question}"\n'
+        f"date: {today}\n"
+        f"---\n"
+        f"\n"
+        f"<!--\n"
+        f"SOURCE TYPE: query-derived synthesis\n"
+        f"Filed back from a wiki query — NOT an external document.\n"
+        f"The knowledge below originated from this wiki's own compiled content.\n"
+        f"When ingest creates a sources/ page for this file, record this provenance\n"
+        f"so the wiki does not present its own synthesis as fresh external evidence.\n"
+        f"Originating question: {question}\n"
+        f"Date filed: {today}\n"
+        f"-->\n"
+        f"\n"
+        f"{answer_text}\n"
+    )
+    raw_file.write_text(file_content, encoding="utf-8")
+
+    result: dict[str, Any] = {
+        "query": query_result,
+        "raw_file": str(raw_file),
+    }
+
+    if not run_ingest:
+        result["status"] = "success"
+        return result
+
+    # Step 3 — Clear the engine checkpoint before ingesting.
+    #
+    # The query pipeline (Step 1) writes a checkpoint at the default path
+    # /tmp/attractor-pipeline/checkpoint.json.  If it's left over, the ingest
+    # pipeline (a different .dot graph) fails with CheckpointMismatchError.
+    # Clearing it here is the same action the CLI's --fresh flag performs.
+    _DEFAULT_CHECKPOINT = Path("/tmp/attractor-pipeline/checkpoint.json")
+    _DEFAULT_CHECKPOINT.unlink(missing_ok=True)
+
+    # Ingest the saved file — same code path as wiki-attractor ingest
+    ingest_result = await ingest(wiki_dir, slug)
+    result["ingest"] = ingest_result
+    result["status"] = (
+        "success"
+        if ingest_result.get("status") in ("success", "completed")
+        else "partial"
+    )
+    return result

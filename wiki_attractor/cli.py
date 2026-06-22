@@ -170,6 +170,116 @@ _BUILDERS = {"session": _make_session_command, "engine": _make_engine_command}
 
 
 # ---------------------------------------------------------------------------
+# Custom query command (--save / --save-as: Karpathy compounding loop)
+#
+# query is the one command that takes an extra flag: --save/--no-save closes
+# the compounding loop (cited answer → raw/ → ingest).  All other commands
+# are fully auto-generated from their registry specs; query needs this one
+# extra surface, so it gets a bespoke builder rather than _make_session_command.
+# ---------------------------------------------------------------------------
+
+
+def _print_query_save_result(result: dict[str, Any]) -> None:
+    """Print query_save result: cited answer then loop-closure summary."""
+    query_r = result.get("query", {})
+    ingest_r = result.get("ingest", {})
+    raw_file = result.get("raw_file", "")
+
+    # Print the cited answer (from the query pass)
+    answer = query_r.get("output", "")
+    if answer:
+        click.echo("\n---------- CITED ANSWER ----------")
+        click.echo(answer)
+        click.echo("----------------------------------")
+    else:
+        click.echo(f"\nquery status: {query_r.get('status', 'unknown')}")
+        if query_r.get("failure_reason"):
+            click.echo(f"query failure: {query_r['failure_reason']}")
+
+    # Print loop-closure summary
+    click.echo("\n[compounding loop] Answer saved to raw/:")
+    click.echo(f"  {raw_file}")
+
+    if ingest_r:
+        click.echo(f"\n[compounding loop] Ingest: {ingest_r.get('status', 'unknown')}")
+        ns = ingest_r.get("node_statuses")
+        if ns:
+            click.echo(f"  nodes: {ns}")
+        if ingest_r.get("failure_reason"):
+            click.echo(f"  ingest failure: {ingest_r['failure_reason']}")
+
+    click.echo("==================================")
+
+
+def _make_query_cli_command() -> click.Command:
+    """Build the `query` click command with optional --save/--no-save support."""
+    spec = REGISTRY["query"]
+
+    @click.command(
+        name="query",
+        help=(
+            "Read-only Q&A: index-first drill, cited answer returned to caller. "
+            "Add --save to close Karpathy's compounding loop: the cited answer is "
+            "saved to raw/ (with query-derived provenance) and ingested as a wiki page."
+        ),
+    )
+    @click.argument("question")
+    @click.option(
+        "--save/--no-save",
+        default=False,
+        help=(
+            "Save the cited answer to raw/ and ingest it as a wiki page "
+            "(the compounding loop). The saved file is marked as query-derived "
+            "synthesis, not an external source. Default: off (read-only)."
+        ),
+    )
+    @click.option(
+        "--save-as",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Custom slug for the saved raw/ file "
+            "(default: auto-derived from the question text). "
+            "Has no effect without --save."
+        ),
+    )
+    @click.pass_context
+    def _query_cmd(
+        ctx: click.Context,
+        question: str,
+        save: bool,
+        save_as: str | None,
+    ) -> None:
+        wiki_dir = ctx.obj["wiki_dir"]
+
+        if ctx.obj["fresh"]:
+            _clear_checkpoint()
+
+        click.echo(f"[wiki-attractor] {spec.name}: {Path(wiki_dir).resolve()}")
+        click.echo(f"[wiki-attractor]   question = {question}")
+        if save:
+            click.echo(
+                "[wiki-attractor]   --save: will file answer back into wiki "
+                "(Karpathy compounding loop)"
+            )
+
+        try:
+            if save:
+                result = asyncio.run(
+                    _api.query_save(wiki_dir, question, save_as=save_as)
+                )
+                _print_query_save_result(result)
+                sys.exit(0 if result.get("status") == "success" else 1)
+            else:
+                result = asyncio.run(_api.query(wiki_dir, question))
+                sys.exit(_print_result(spec.name.upper(), result))
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    return _query_cmd
+
+
+# ---------------------------------------------------------------------------
 # Root group
 # ---------------------------------------------------------------------------
 
@@ -206,8 +316,15 @@ def main(ctx: click.Context, wiki_dir: Path | None, fresh: bool) -> None:
 
 
 # Register every pipeline as a command.
+# `query` is skipped here — it needs --save/--no-save support and uses a
+# custom builder below.  All other commands are fully auto-generated.
 for _spec in REGISTRY.values():
+    if _spec.name == "query":
+        continue
     main.add_command(_BUILDERS[_spec.executor](_spec))
+
+# Register the query command with --save/--no-save support (compounding loop).
+main.add_command(_make_query_cli_command())
 
 
 if __name__ == "__main__":

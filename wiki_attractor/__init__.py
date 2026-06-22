@@ -10,6 +10,7 @@ from .api import (
     lint,
     publish,
     query,
+    query_save,
     review,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "lint",
     "publish",
     "query",
+    "query_save",
     "review",
 ]
