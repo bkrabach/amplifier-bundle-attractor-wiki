@@ -11,11 +11,23 @@ For every sources/*.md that contains anonymous @N speaker handles:
   3. If the source page has @N handles but no structured block, BACKFILLS
      the structured block from the prose (upgrades old pages on first run).
 
-For every people/*.md page:
+For every people/*.md page — TWO passes:
+
+PASS 1 (section-level, citation-anchored):
   - Reads the sources[] frontmatter to get cited sources.
   - For any cited source where this person appears as an INFERRED handle:
     checks that the person page has an ## Attribution confidence section.
   - If missing: ADDS it (idempotent — won't double-add).
+
+PASS 2 (bullet-level, see-also / weave link following):
+  - Scans ALL bullet lines on the person page that contain wikilinks [[slug]].
+  - For each such bullet, resolves the linked page and reads ITS sources[].
+  - If the linked page cites a source where THIS person is an INFERRED @N,
+    appends an inline *(inferred speaker: ...)* marker to that specific bullet.
+  - Idempotent: skips bullets that already carry the marker.
+  - Scope-limited to avoid over-flag: only fires when the LINKED PAGE cites
+    the specific inferred source — named claims from pages citing different
+    (non-inferred) sources are left untouched by construction.
 
 The structured block format written to source pages:
   <!-- SPEAKER_RESOLUTION_TABLE
@@ -93,6 +105,12 @@ _TITLE_RE = re.compile(r"^title:\s*[\"']?(.+?)[\"']?\s*$", re.MULTILINE)
 
 # YAML frontmatter type
 _TYPE_RE = re.compile(r"^type:\s*(\w+)", re.MULTILINE)
+
+# Wikilinks in bullet lines: [[slug]] or [[slug|label]]
+_WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
+
+# Idempotency guard for bullet-level inline hedges (second pass)
+_INFERRED_BULLET_MARKER_RE = re.compile(r"\*\(inferred speaker", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -292,14 +310,130 @@ def add_attribution_hedge(
 
 
 # ---------------------------------------------------------------------------
+# See-also / weave-link following (second pass helpers)
+# ---------------------------------------------------------------------------
+
+
+def resolve_wiki_page(wiki_dir: Path, slug: str) -> Path | None:
+    """Resolve a wikilink slug to a filesystem path within wiki_dir.
+
+    Handles:
+      "concepts/dreaming"  -> wiki_dir/concepts/dreaming.md
+      "dreaming"           -> wiki_dir/**/dreaming.md (first match)
+      "people/paul"        -> wiki_dir/people/paul.md
+    Returns None if the page cannot be found.
+    """
+    slug = slug.strip()
+    if "/" in slug:
+        candidate = wiki_dir / (slug + ".md")
+        if candidate.exists():
+            return candidate
+    else:
+        for md_path in wiki_dir.rglob(f"{slug}.md"):
+            return md_path
+    return None
+
+
+def hedge_see_also_bullets(
+    person_path: Path,
+    person_name: str,
+    inferred_sources: dict[str, tuple[str, str]],
+    wiki_dir: Path,
+) -> int:
+    """Second pass: hedge bullets that link to pages citing an inferred transcript source.
+
+    For each bullet line on person_path that:
+    (a) contains a wikilink [[slug]]
+    (b) the linked page's sources[] includes any key from inferred_sources
+    (c) does not already carry an inferred-speaker marker
+    → Appends an inline *(inferred speaker: ...)* marker to that line.
+
+    inferred_sources: {source_slug: (handle_num, basis)} — sources where this
+    person appears as an INFERRED @N speaker.
+
+    Scoping prevents over-flag: the hedge fires ONLY when the LINKED PAGE cites
+    the specific inferred source. Named claims from pages citing different (non-
+    inferred) sources are untouched by construction.
+
+    Idempotent: skips bullets already carrying the marker pattern.
+    Returns number of bullets hedged.
+    """
+    content = person_path.read_text(encoding="utf-8")
+    lines = content.split("\n")
+    new_lines = []
+    hedges_added = 0
+
+    for line in lines:
+        stripped = line.strip()
+        # Only process bullet lines that contain wikilinks
+        if not (stripped.startswith("-") and "[[" in line):
+            new_lines.append(line)
+            continue
+
+        # Already hedged → skip (idempotency)
+        if _INFERRED_BULLET_MARKER_RE.search(line):
+            new_lines.append(line)
+            continue
+
+        # Extract all wikilink slugs from this bullet
+        linked_slugs = [m.group(1).strip() for m in _WIKILINK_RE.finditer(line)]
+        if not linked_slugs:
+            new_lines.append(line)
+            continue
+
+        # Check whether any linked page cites an inferred source for this person
+        hedge_info: tuple[str, str, str] | None = (
+            None  # (source_slug, handle_num, basis)
+        )
+
+        for slug in linked_slugs:
+            linked_page = resolve_wiki_page(wiki_dir, slug)
+            if linked_page is None:
+                continue
+
+            try:
+                linked_content = linked_page.read_text(encoding="utf-8")
+            except OSError:
+                continue
+
+            linked_sources = get_cited_sources(linked_content)
+
+            # Does any inferred source for this person appear in the linked page?
+            for source_slug, (handle_num, basis) in inferred_sources.items():
+                if source_slug in linked_sources:
+                    hedge_info = (source_slug, handle_num, basis)
+                    break
+
+            if hedge_info is not None:
+                break
+
+        if hedge_info is not None:
+            source_slug, handle_num, basis = hedge_info
+            marker = (
+                f" *(inferred speaker: `@{handle_num}` in "
+                f"[[sources/{source_slug}]] attributed to {person_name} "
+                f"by content-matching \u2014 see source SPEAKER_RESOLUTION_TABLE)*"
+            )
+            new_lines.append(line.rstrip() + marker)
+            hedges_added += 1
+        else:
+            new_lines.append(line)
+
+    if hedges_added > 0:
+        person_path.write_text("\n".join(new_lines), encoding="utf-8")
+
+    return hedges_added
+
+
+# ---------------------------------------------------------------------------
 # Main enforcement logic
 # ---------------------------------------------------------------------------
 
 
-def enforce(wiki_dir: Path) -> tuple[int, int, int]:
+def enforce(wiki_dir: Path) -> tuple[int, int, int, int]:
     """Run the full enforcement pass.
 
-    Returns (sources_processed, blocks_backfilled, hedges_added).
+    Returns (sources_processed, blocks_backfilled, section_hedges, bullet_hedges).
     """
     sources_dir = wiki_dir / "sources"
     people_dir = wiki_dir / "people"
@@ -308,7 +442,7 @@ def enforce(wiki_dir: Path) -> tuple[int, int, int]:
         print(
             f"enforce-attribution: skip (sources/ or people/ not found in {wiki_dir})"
         )
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     # Build resolution map: source_slug → {handle_num: (person, status, basis)}
     resolution_map: dict[str, dict[str, tuple[str, str, str]]] = {}
@@ -340,8 +474,8 @@ def enforce(wiki_dir: Path) -> tuple[int, int, int]:
         if resolution:
             resolution_map[slug] = resolution
 
-    # Now enforce hedges on person pages
-    hedges_added = 0
+    # --- Pass 1: Section-level hedges for pages that DIRECTLY CITE an inferred source ---
+    section_hedges = 0
 
     for person_path in sorted(people_dir.glob("*.md")):
         content = person_path.read_text(encoding="utf-8")
@@ -394,9 +528,63 @@ def enforce(wiki_dir: Path) -> tuple[int, int, int]:
 
         # Add the hedge
         add_attribution_hedge(person_path, inferred_entries)
-        hedges_added += 1
+        section_hedges += 1
 
-    return sources_processed, blocks_backfilled, hedges_added
+    # --- Pass 2: Bullet-level hedges for bullets linking to pages that cite an ---
+    # --- inferred source — catches weave-introduced attributions where the person ---
+    # --- page doesn't directly cite the inferred transcript in its frontmatter.  ---
+
+    # Build a reverse map: normalised person name → {source_slug: (handle_num, basis)}
+    # using ALL inferred entries across ALL sources (not just those the person cited).
+    person_inferred_all: dict[str, dict[str, tuple[str, str]]] = {}
+    for source_slug, resolution in resolution_map.items():
+        for handle_num, (resolved_name, status, basis) in resolution.items():
+            if status != "inferred":
+                continue
+            key = resolved_name.strip().lower()
+            if key not in person_inferred_all:
+                person_inferred_all[key] = {}
+            # First inferred entry for this (person, source) wins; don't overwrite
+            if source_slug not in person_inferred_all[key]:
+                person_inferred_all[key][source_slug] = (handle_num, basis)
+
+    bullet_hedges = 0
+
+    for person_path in sorted(people_dir.glob("*.md")):
+        content = person_path.read_text(encoding="utf-8")
+
+        type_m = _TYPE_RE.search(content[:300])
+        if not type_m or type_m.group(1) != "person":
+            continue
+
+        person_name = get_person_name(content)
+        if not person_name:
+            continue
+
+        # Find the inferred-source entries for this person across all sources
+        pn_lower = person_name.lower()
+        pn_parts = pn_lower.split()
+        inferred_sources: dict[str, tuple[str, str]] = {}
+        for key, source_map in person_inferred_all.items():
+            if (
+                pn_lower in key
+                or key in pn_lower
+                or any(part in key for part in pn_parts if len(part) > 2)
+            ):
+                # Merge without overwriting: first match wins per source_slug
+                for slug, val in source_map.items():
+                    if slug not in inferred_sources:
+                        inferred_sources[slug] = val
+
+        if not inferred_sources:
+            continue
+
+        added = hedge_see_also_bullets(
+            person_path, person_name, inferred_sources, wiki_dir
+        )
+        bullet_hedges += added
+
+    return sources_processed, blocks_backfilled, section_hedges, bullet_hedges
 
 
 # ---------------------------------------------------------------------------
@@ -412,14 +600,16 @@ def main() -> None:
         print(f"enforce-attribution: package directory '{wiki_dir}' not found — skip")
         sys.exit(0)
 
-    processed, backfilled, hedges = enforce(wiki_dir)
+    processed, backfilled, section_hedges, bullet_hedges = enforce(wiki_dir)
 
     summary_parts = [f"enforce-attribution: {processed} transcript source(s) scanned"]
     if backfilled:
         summary_parts.append(f"{backfilled} structured table(s) backfilled")
-    if hedges:
-        summary_parts.append(f"{hedges} attribution hedge(s) added to person pages")
-    if not backfilled and not hedges:
+    if section_hedges:
+        summary_parts.append(f"{section_hedges} section hedge(s) added to person pages")
+    if bullet_hedges:
+        summary_parts.append(f"{bullet_hedges} see-also bullet(s) hedged inline")
+    if not backfilled and not section_hedges and not bullet_hedges:
         summary_parts.append("all hedges present")
 
     print("; ".join(summary_parts))
