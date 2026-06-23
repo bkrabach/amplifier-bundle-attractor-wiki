@@ -218,11 +218,38 @@ for _path in sorted(glob.glob(os.path.join(wiki, "**", "*.md"), recursive=True))
             f"write actual Unicode characters (e.g. \u2014 in source = em-dash —, not a JSON escape): ...{_ctx}..."
         )
 
+# --- speaker-resolution-table check: source pages that contain @N speaker handles
+#     (anonymous speaker references) but lack a SPEAKER_RESOLUTION_TABLE block
+#     are ambiguous — the deterministic attribution enforcer needs the structured
+#     block to guarantee correct person-page hedging. This check fires as a
+#     WARNING (not an error) so old source pages don't block existing wikis;
+#     new ingests should produce the block automatically via write_pages.
+#     The enforce_speaker_attribution.py script backfills old pages on each run.
+import re as _srt_re
+_SRT_HANDLE_RE = _srt_re.compile(r'`@\d+`|\b@\d+\s*[=\(]')
+_SRT_TABLE_RE = _srt_re.compile(r'<!-- SPEAKER_RESOLUTION_TABLE')
+warnings = []
+for _path in sorted(glob.glob(os.path.join(wiki, "sources", "*.md"))):
+    if os.path.basename(_path) == ".gitkeep":
+        continue
+    with open(_path, encoding="utf-8") as _fh:
+        _src = _fh.read()
+    if _SRT_HANDLE_RE.search(_src) and not _SRT_TABLE_RE.search(_src):
+        _rel = os.path.relpath(_path, wiki)
+        warnings.append(
+            f"{_rel}: has @N speaker handles but no SPEAKER_RESOLUTION_TABLE block "
+            f"(run enforce_speaker_attribution.py to backfill)"
+        )
+
 if errors:
     for e in errors:
         print(f"ERROR: {e}")
     print(f"verify: {len(errors)} error(s) across {checked} page(s)")
     sys.exit(1)
+
+if warnings:
+    for w in warnings:
+        print(f"WARNING: {w}")
 
 print(f"verify: clean ({checked} entity page(s) checked)")
 PY
