@@ -23,6 +23,7 @@ independent quality judging.
 | **Reliability: `query --save` loop** | ✅ Multi-trial stable (3/3 trials) |
 | **Reliability: weave connections** | ✅ Multi-trial stable; 0% content fabrication in grounding eval |
 | **Reliability: attribution enforcement** | ✅ Deterministic after PR #8 (v3 named-basis suppression: BARE {0,0,0}, OVER-FLAG {0,0,0}) |
+| **Interactive agent (amplifier-app-cli + bundle)** | ✅ Proven — validated end-to-end in a clean DTU: bundle installs via `amplifier bundle add --app` (v0.2.0); the `wiki_*` tools (`wiki_init`, `wiki_ingest`, `wiki_query`, `wiki_lint`, `wiki_publish`, `wiki_review`, `wiki_apply_resolutions`) mounted into an interactive Amplifier agent session; agent ran init → ingest → query producing a verify-clean wiki (6 entity pages, grounded cited answer). Minor nuance: wikilink style can vary between bare-slug (`[[ada-lovelace]]`) and type-prefixed (`[[people/ada-lovelace]]`) forms — both resolve in Obsidian and pass `verify.sh`, but the inconsistency is unfixed. |
 
 ---
 
@@ -37,14 +38,13 @@ These inputs are **rejected loudly** at the API boundary — no silent garbage, 
 
 ---
 
-## Experimental / unvalidated usage modes
+## Experimental / planned usage modes
 
-These usage modes have NOT been validated end-to-end. Use at your own risk until proven.
+The following has been partially validated (engine + dialect compatibility confirmed) but does not run end-to-end as-is.
 
 | Mode | Status |
 |------|--------|
-| **Interactive agent (amplifier-app-cli with bundle installed)** | ❓ Unvalidated — the bundle structure is correct, but no end-to-end test of tool invocation via an interactive session has been run |
-| **Dot-resolver in Amplifier Resolve** | ❓ Unvalidated — the portable `.dot` pipelines are designed for this use case but have not been exercised in a Resolve context |
+| **Dot-graph resolver in Amplifier Resolve** | ⚠️ Engine/dialect-compatible; execution context mismatch — not runnable as-is without a provisioning shim. The dot-graph resolver uses the identical `amplifier_module_loop_pipeline` engine; all 5 wiki-attractor `.dot` files parse and validate under it (5/5, confirmed by parser + `validate_or_raise`). The `.dot` files themselves need zero changes. However, Resolve's default execution context is a cloned code repo, while these pipelines require a wiki working directory (`.wiki/scripts/verify.sh`, `team-knowledge/`, `raw/`), the `wiki_attractor` package, and injected `$ASSETS`/`$source` variables. The first ingest node (`test -f .wiki/context/schema.md`) fails immediately in a non-wiki dir, so the pipeline exits without doing work. Running these pipelines via Resolve requires a container provisioning shim — a resolver instance configuration that (a) targets a wiki dir, (b) installs `wiki_attractor`, (c) plants the helper scripts/assets, and (d) maps the required variables. This shim is planned as a fast-follow but has not been built or validated end-to-end. Determination was made via resolver source inspection and the parser/validator (deterministic checks), not a live full-stack run. |
 
 ---
 
