@@ -180,13 +180,6 @@ async def main() -> int:
     print(f"[dropin] question  : {question}")
     print()
 
-    # Clear checkpoint to avoid CheckpointMismatchError.
-    chk = Path("/tmp/attractor-pipeline/checkpoint.json")
-    try:
-        chk.unlink()
-    except FileNotFoundError:
-        pass
-
     result = await run_dot_dropin(dot_path, wiki_dir, subs={"$question": question})
 
     print()
