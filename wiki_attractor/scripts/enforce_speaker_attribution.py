@@ -8,7 +8,10 @@ For every sources/*.md that contains anonymous @N speaker handles:
   1. Reads the SPEAKER_RESOLUTION_TABLE structured block (preferred format).
   2. Falls back to parsing the existing prose "Speaker handle resolution"
      section for source pages created before this change was merged.
-  3. If the source page has @N handles but no structured block, BACKFILLS
+  3. Falls back to parsing inline semicolon-format resolutions (e.g.
+     "Speaker handle resolution: @2 = Brian; @3 = Paul; @6 = Marc")
+     as a third fallback — common in show-and-tell-style source pages.
+  4. If the source page has @N handles but no structured block, BACKFILLS
      the structured block from the prose (upgrades old pages on first run).
 
 For every people/*.md page — TWO passes:
@@ -23,11 +26,11 @@ PASS 2 (bullet-level, see-also / weave link following):
   - Scans ALL bullet lines on the person page that contain wikilinks [[slug]].
   - For each such bullet, resolves the linked page and reads ITS sources[].
   - If the linked page cites a source where THIS person is an INFERRED @N,
-    appends an inline *(inferred speaker: ...)* marker to that specific bullet.
+    CHECKS whether person P has a named basis in any of the linked page's
+    OTHER cited sources (via resolution_map status=named).
+    - If P has a named basis in another source → SUPPRESS (do not hedge).
+    - Only hedges if P is inferred-only across the linked page's sources.
   - Idempotent: skips bullets that already carry the marker.
-  - Scope-limited to avoid over-flag: only fires when the LINKED PAGE cites
-    the specific inferred source — named claims from pages citing different
-    (non-inferred) sources are left untouched by construction.
 
 The structured block format written to source pages:
   <!-- SPEAKER_RESOLUTION_TABLE
@@ -112,6 +115,17 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
 # Idempotency guard for bullet-level inline hedges (second pass)
 _INFERRED_BULLET_MARKER_RE = re.compile(r"\*\(inferred speaker", re.IGNORECASE)
 
+# Semicolon-format speaker resolution header (third fallback parser):
+#   "Speaker handle resolution: @2 = Brian; @3 = Paul; @6 = Marc; ..."
+_SEMICOLON_RESOLUTION_HEADER_RE = re.compile(
+    r"(?im)(?:speaker\s+handle\s+resolution|attendee\s+handle\s+resolution)\s*:",
+)
+# Each inline @N = Person assignment (terminates at ; or end-of-segment)
+_SEMICOLON_ENTRY_RE = re.compile(
+    r"@(\d+)\s*=\s*([A-Z][a-zA-Z\s\-\.]{1,40}?)(?:;|\s*\n|$)",
+    re.MULTILINE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Resolution table parsing
@@ -191,6 +205,55 @@ def parse_resolution_prose(content: str) -> dict[str, tuple[str, str, str]]:
             status = "inferred"
 
         result[handle] = (person, status, "(parsed from prose)")
+
+    return result
+
+
+def parse_resolution_semicolon(content: str) -> dict[str, tuple[str, str, str]]:
+    """Parse inline semicolon-format speaker resolution section (third fallback).
+
+    Handles source pages that use:
+      Speaker handle resolution: @2 = Brian Krabach; @3 = Paul Payne; @6 = Marc Goodner; ...
+
+    Status determination:
+      - 'named' if there is a "confirmed by name" attendee section within 500 chars before
+        the resolution header (i.e. the attendees are explicitly confirmed).
+      - 'inferred' otherwise (conservative default).
+
+    Returns {handle_num: (person_name, status, basis)} or empty dict.
+    """
+    m = _SEMICOLON_RESOLUTION_HEADER_RE.search(content)
+    if not m:
+        return {}
+
+    # Determine status from context preceding the resolution header.
+    pre_start = max(0, m.start() - 500)
+    before = content[pre_start : m.start()].lower()
+    status = "named" if "confirmed by name" in before else "inferred"
+
+    # Extract the resolution block: from the header to the next blank line or ## heading.
+    block_start = m.end()
+    seg_end_m = re.search(r"\n\s*\n|\n#{1,4}\s", content[block_start:])
+    block_end = block_start + (seg_end_m.start() if seg_end_m else 600)
+    block_text = content[block_start:block_end]
+
+    result: dict[str, tuple[str, str, str]] = {}
+    for em in _SEMICOLON_ENTRY_RE.finditer(block_text):
+        handle = em.group(1).strip()
+        person = em.group(2).strip().rstrip(";,").strip()
+        # Skip if the "name" is actually a description start (contains digits,
+        # lowercase words like 'discusses', or common non-name words).
+        if not person or person[0].islower():
+            continue
+        person_lower = person.lower()
+        if (
+            "unresolved" in person_lower
+            or "unknown" in person_lower
+            or person_lower.startswith("discusses")
+        ):
+            result[handle] = ("unresolved", "unresolved", "(semicolon)")
+            continue
+        result[handle] = (person, status, "(semicolon)")
 
     return result
 
@@ -314,6 +377,55 @@ def add_attribution_hedge(
 # ---------------------------------------------------------------------------
 
 
+def _names_match(resolved: str, person: str) -> bool:
+    """Case-insensitive fuzzy name match (shared utility)."""
+    rn = resolved.lower()
+    pn = person.lower()
+    pn_parts = pn.split()
+    return (
+        pn in rn
+        or rn in pn
+        or any(part in rn for part in pn_parts if len(part) > 2)
+    )
+
+
+def person_has_named_basis_in_page_sources(
+    person_name: str,
+    linked_sources: list[str],
+    triggering_source_slug: str,
+    sources_dir: Path,
+    resolution_map: dict[str, dict[str, tuple[str, str, str]]],
+) -> bool:
+    """Check if person P has a named basis in any of linked page C's sources.
+
+    A "named basis" means at least one of C's cited sources (EXCLUDING the
+    triggering inferred source S) has person P with status='named' in the
+    resolved speaker resolution map.
+
+    Returns True → SUPPRESS the see-also hedge (named claim, not inferred).
+    Returns False → proceed with hedging (P is inferred-only across C's sources).
+
+    This separates:
+      - marc/team-pulse: team-pulse cites show-and-tell where @6=Marc named
+        (show-and-tell's "Attendees confirmed by name" + section headers)
+        → person_has_named_basis returns True → suppress
+      - paul/dreaming: dreaming cites the team-chat (trigger) + a query-derived
+        source (no resolution at all) → returns False → hedge
+    """
+    for source_slug in linked_sources:
+        if source_slug == triggering_source_slug:
+            continue  # Skip the trigger source itself
+
+        if source_slug not in resolution_map:
+            continue
+
+        for _handle, (resolved_name, status, _basis) in resolution_map[source_slug].items():
+            if status == "named" and _names_match(resolved_name, person_name):
+                return True
+
+    return False
+
+
 def resolve_wiki_page(wiki_dir: Path, slug: str) -> Path | None:
     """Resolve a wikilink slug to a filesystem path within wiki_dir.
 
@@ -339,25 +451,34 @@ def hedge_see_also_bullets(
     person_name: str,
     inferred_sources: dict[str, tuple[str, str]],
     wiki_dir: Path,
+    resolution_map: dict[str, dict[str, tuple[str, str, str]]] | None = None,
 ) -> int:
     """Second pass: hedge bullets that link to pages citing an inferred transcript source.
 
     For each bullet line on person_path that:
     (a) contains a wikilink [[slug]]
     (b) the linked page's sources[] includes any key from inferred_sources
-    (c) does not already carry an inferred-speaker marker
+    (c) person P does NOT have a named basis in any other source cited by the
+        linked page (named basis check via resolution_map — prevents over-flag)
+    (d) does not already carry an inferred-speaker marker
     → Appends an inline *(inferred speaker: ...)* marker to that line.
 
     inferred_sources: {source_slug: (handle_num, basis)} — sources where this
     person appears as an INFERRED @N speaker.
 
-    Scoping prevents over-flag: the hedge fires ONLY when the LINKED PAGE cites
-    the specific inferred source. Named claims from pages citing different (non-
-    inferred) sources are untouched by construction.
+    Named-basis suppression (v3): before hedging, check whether person P has
+    status=named in any of the linked page's OTHER cited sources (i.e. sources
+    besides the triggering inferred source S). If so, P has a named basis and
+    the hedge is suppressed. This closes the marc/team-pulse over-flag: team-pulse
+    cites show-and-tell where Marc appears as a named @6 (confirmed attendee +
+    section presenter), so the hedge is suppressed for Marc there.
 
     Idempotent: skips bullets already carrying the marker pattern.
     Returns number of bullets hedged.
     """
+    if resolution_map is None:
+        resolution_map = {}
+
     content = person_path.read_text(encoding="utf-8")
     lines = content.split("\n")
     new_lines = []
@@ -382,9 +503,8 @@ def hedge_see_also_bullets(
             continue
 
         # Check whether any linked page cites an inferred source for this person
-        hedge_info: tuple[str, str, str] | None = (
-            None  # (source_slug, handle_num, basis)
-        )
+        # hedge_info: (source_slug, handle_num, basis, all_linked_sources)
+        hedge_info: tuple[str, str, str, list[str]] | None = None
 
         for slug in linked_slugs:
             linked_page = resolve_wiki_page(wiki_dir, slug)
@@ -401,14 +521,38 @@ def hedge_see_also_bullets(
             # Does any inferred source for this person appear in the linked page?
             for source_slug, (handle_num, basis) in inferred_sources.items():
                 if source_slug in linked_sources:
-                    hedge_info = (source_slug, handle_num, basis)
+                    hedge_info = (source_slug, handle_num, basis, linked_sources)
                     break
 
             if hedge_info is not None:
                 break
 
         if hedge_info is not None:
-            source_slug, handle_num, basis = hedge_info
+            source_slug, handle_num, basis, all_linked_sources = hedge_info
+
+            # Named-basis suppression (two conditions BOTH required):
+            # (1) P has status=named in any of the linked page's OTHER cited sources.
+            # (2) P's OWN person page does NOT directly cite the trigger source S.
+            #
+            # Condition 2 is a safety valve: if P has their own direct stake in the
+            # inferred transcript (their page cites it), suppress must not fire even
+            # if P is also named elsewhere — the see-also bullet may legitimately
+            # trace to P's @N content in S.  This correctly keeps brian/@1 hedged
+            # (brian.md cites the trigger) while suppressing marc/@2 (marc.md does
+            # not cite the trigger; marc's claims come from named sources only).
+            person_own_sources = get_cited_sources(content)
+            cond1 = person_has_named_basis_in_page_sources(
+                person_name,
+                all_linked_sources,
+                source_slug,
+                wiki_dir / "sources",
+                resolution_map,
+            )
+            cond2 = source_slug not in person_own_sources  # person doesn't own the trigger
+            if cond1 and cond2:
+                new_lines.append(line)  # suppress — named basis, person has no stake in trigger
+                continue
+
             marker = (
                 f" *(inferred speaker: `@{handle_num}` in "
                 f"[[sources/{source_slug}]] attributed to {person_name} "
@@ -465,6 +609,10 @@ def enforce(wiki_dir: Path) -> tuple[int, int, int, int]:
         if not resolution:
             # Fall back to prose parsing
             resolution = parse_resolution_prose(content)
+            if not resolution:
+                # Third fallback: inline semicolon-format resolution
+                # (e.g. "Speaker handle resolution: @2 = Brian; @6 = Marc; ...")
+                resolution = parse_resolution_semicolon(content)
             if resolution:
                 # Backfill the structured block into the source page
                 did_backfill = backfill_structured_block(source_path, resolution)
@@ -580,7 +728,7 @@ def enforce(wiki_dir: Path) -> tuple[int, int, int, int]:
             continue
 
         added = hedge_see_also_bullets(
-            person_path, person_name, inferred_sources, wiki_dir
+            person_path, person_name, inferred_sources, wiki_dir, resolution_map
         )
         bullet_hedges += added
 
