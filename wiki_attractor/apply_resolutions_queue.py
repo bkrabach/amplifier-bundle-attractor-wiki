@@ -41,6 +41,8 @@ Subcommands:
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -177,13 +179,148 @@ def cmd_requeue() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Coverage check — deterministic required-page guard
+# ---------------------------------------------------------------------------
+
+
+def _parse_required_pages(item: dict) -> list[str]:
+    """Derive the required page set from target_pages + resolution text references.
+
+    Primary source: target_pages (the authoritative list of what the resolution
+    is expected to touch).  Secondary: explicit page paths parsed from the
+    resolution freetext/decision text (safety net for pages named in prose but
+    omitted from target_pages).
+    """
+    required: set[str] = set()
+
+    # 1. Explicit target_pages (authoritative).
+    for p in item.get("target_pages") or []:
+        p = str(p).strip()
+        if p:
+            required.add(p)
+
+    # 2. Explicit "type/page.md" or "team-knowledge/type/page.md" references in text.
+    resolution = item.get("resolution") or {}
+    text = (resolution.get("freetext") or resolution.get("decision") or "").strip()
+    for m in re.findall(
+        r"(?:team-knowledge/)?(?:outcomes|concepts|people|sources)/[\w-]+\.md",
+        text,
+    ):
+        if not m.startswith("team-knowledge/"):
+            m = "team-knowledge/" + m
+        required.add(m)
+
+    return sorted(required)
+
+
+def _get_changed_pages() -> set[str]:
+    """Return paths of actually-changed pages from apply-changes.txt + git status."""
+    changed: set[str] = set()
+
+    # Primary: .wiki/apply-changes.txt — written by the apply LLM node.
+    if CHANGES_TXT.exists():
+        for line in CHANGES_TXT.read_text().splitlines():
+            line = line.strip()
+            if line:
+                changed.add(line)
+
+    # Secondary: git status --short team-knowledge/ (fallback / corroboration).
+    try:
+        result = subprocess.run(
+            ["git", "status", "--short", "team-knowledge/"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    # Handle renames: "old -> new"
+                    path = parts[1].strip().split(" -> ")[-1].strip('"').strip()
+                    changed.add(path)
+    except Exception:
+        pass
+
+    return changed
+
+
+def cmd_coverage_check() -> int:
+    """Deterministic required-page-coverage guard (Step 3a in apply-resolutions.dot).
+
+    Reads apply-current.json, derives the required page set (target_pages +
+    resolution text references), and compares against the pages ACTUALLY changed
+    (from .wiki/apply-changes.txt + git status).
+
+    Prints:
+      ``missing_pages``  -- if any required page was NOT in the changed set;
+                            also writes "uncertain: <page> required by the
+                            resolution was not modified" to apply-semantic-verdict.txt
+                            so the downstream requeue node can record the reason.
+      ``all_covered``    -- if every required page appears in the changed set
+                            (or if we have no change data to determine either way).
+
+    This guard is deterministic and runs before the LLM semantic check.  It catches
+    the structural incompleteness class (a named page was simply skipped) without any
+    LLM involvement.  The LLM semantic check then runs only for pages that ARE changed,
+    verifying they were modified *correctly*.  Either gate returning uncertain causes
+    the item to be requeued as applied_uncertain rather than sealed as applied.
+    """
+    if not CUR_JSON.exists():
+        print("error:no-current-item")
+        return 1
+
+    try:
+        item = json.loads(CUR_JSON.read_text())
+    except Exception as exc:
+        print(f"error:cannot-read-current-item:{exc}")
+        return 1
+
+    required = _parse_required_pages(item)
+    if not required:
+        # No required pages to check — pass through to LLM semantic check.
+        print("all_covered")
+        return 0
+
+    changed = _get_changed_pages()
+
+    # Fail OPEN if we have no change data (can't make a reliable determination).
+    # Better to let the LLM semantic check handle it than to false-positive here.
+    if not changed:
+        print("all_covered")
+        return 0
+
+    # Normalize both sets: strip leading './' for comparison.
+    changed_norm = {p.lstrip("./") for p in changed}
+
+    missing = [
+        req.lstrip("./") for req in required if req.lstrip("./") not in changed_norm
+    ]
+
+    if missing:
+        reason = f"uncertain: {missing[0]} required by the resolution was not modified"
+        VERDICT_TXT.parent.mkdir(parents=True, exist_ok=True)
+        VERDICT_TXT.write_text(reason + "\n")
+        print("missing_pages")
+        return 0
+
+    print("all_covered")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        print("usage: apply_resolutions_queue.py next | mark_applied | requeue")
+        print(
+            "usage: apply_resolutions_queue.py next | mark_applied | requeue | coverage_check"
+        )
         return 2
     cmd = argv[1]
     if cmd == "next":
@@ -192,6 +329,8 @@ def main(argv: list[str]) -> int:
         return cmd_mark_applied()
     if cmd == "requeue":
         return cmd_requeue()
+    if cmd == "coverage_check":
+        return cmd_coverage_check()
     print(f"unknown command: {cmd}")
     return 2
 
