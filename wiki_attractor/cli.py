@@ -2,9 +2,9 @@
 """wiki-attractor -- a thin click wrapper over the wiki-attractor API.
 
 The CLI is intentionally thin: it parses click arguments, handles CLI-specific
-concerns (--fresh checkpoint clearing, ConsoleInterviewer for interactive
-review, pre-flight source-file validation), and delegates to the bespoke
-wiki_attractor API (wiki_attractor.api) for each command.
+concerns (ConsoleInterviewer for interactive review, pre-flight source-file
+validation), and delegates to the bespoke wiki_attractor API
+(wiki_attractor.api) for each command.
 
 Layer contract:
   .dot files    — ALL real work; named as their command; portable drop-ins
@@ -25,20 +25,9 @@ import click
 import wiki_attractor.api as _api
 from .registry import REGISTRY, PipelineSpec
 
-_DEFAULT_CHECKPOINT = Path("/tmp/attractor-pipeline/checkpoint.json")
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _clear_checkpoint() -> None:
-    """Remove the engine checkpoint so a fresh run can't hit CheckpointMismatchError."""
-    try:
-        _DEFAULT_CHECKPOINT.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _print_result(name: str, result: dict[str, Any]) -> int:
@@ -105,9 +94,6 @@ def _make_session_command(spec: PipelineSpec) -> click.Command:
                 raise click.ClickException(
                     f"source not found in raw/: {kwargs['source']}"
                 )
-
-        if ctx.obj["fresh"]:
-            _clear_checkpoint()
 
         click.echo(f"[wiki-attractor] {spec.name}: {Path(wiki_dir).resolve()}")
         for k, v in kwargs.items():
@@ -252,9 +238,6 @@ def _make_query_cli_command() -> click.Command:
     ) -> None:
         wiki_dir = ctx.obj["wiki_dir"]
 
-        if ctx.obj["fresh"]:
-            _clear_checkpoint()
-
         click.echo(f"[wiki-attractor] {spec.name}: {Path(wiki_dir).resolve()}")
         click.echo(f"[wiki-attractor]   question = {question}")
         if save:
@@ -291,14 +274,9 @@ def _make_query_cli_command() -> click.Command:
     default=None,
     help="Wiki repo to operate on (default: current directory).",
 )
-@click.option(
-    "--fresh/--resume",
-    default=True,
-    help="Clear the engine checkpoint before a session run (default: fresh).",
-)
 @click.version_option(package_name="wiki-attractor", prog_name="wiki-attractor")
 @click.pass_context
-def main(ctx: click.Context, wiki_dir: Path | None, fresh: bool) -> None:
+def main(ctx: click.Context, wiki_dir: Path | None) -> None:
     """Run amplifier-bundle-llm-wiki workflows as attractor pipelines.
 
     Each subcommand drives a .dot pipeline (wiki_attractor/pipelines/).
@@ -306,7 +284,6 @@ def main(ctx: click.Context, wiki_dir: Path | None, fresh: bool) -> None:
     """
     ctx.ensure_object(dict)
     ctx.obj["wiki_dir"] = wiki_dir if wiki_dir is not None else Path.cwd()
-    ctx.obj["fresh"] = fresh
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
         click.echo("")

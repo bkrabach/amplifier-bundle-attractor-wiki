@@ -387,15 +387,6 @@ async def query_save(
         result["status"] = "success"
         return result
 
-    # Step 3 — Clear the engine checkpoint before ingesting.
-    #
-    # The query pipeline (Step 1) writes a checkpoint at the default path
-    # /tmp/attractor-pipeline/checkpoint.json.  If it's left over, the ingest
-    # pipeline (a different .dot graph) fails with CheckpointMismatchError.
-    # Clearing it here is the same action the CLI's --fresh flag performs.
-    _DEFAULT_CHECKPOINT = Path("/tmp/attractor-pipeline/checkpoint.json")
-    _DEFAULT_CHECKPOINT.unlink(missing_ok=True)
-
     # Ingest the saved file — same code path as wiki-attractor ingest
     ingest_result = await ingest(wiki_dir, slug)
     result["ingest"] = ingest_result
