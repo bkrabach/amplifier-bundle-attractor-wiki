@@ -4,12 +4,22 @@
 // Resolutions are either structured decisions (type_migration, entailment_unsure)
 // or free-text NL feedback from a human or from the automated ingest review pass.
 //
-// SEMANTIC GATE (the council FAIL fix): a post-apply LLM spot-check verifies
-// that the apply accomplished the FULL intent of the resolution. A structurally
-// valid but semantically-incomplete apply (1 of 3 required pages changed;
-// verify.sh passes because no broken links) is caught and set to "applied_uncertain"
-// rather than sealed as "applied". This prevents a structurally-clean but
-// wrong-first-application from permanently closing an item.
+// TWO-LAYER SEMANTIC GATE:
+//
+//   Layer 1 — COVERAGE CHECK (deterministic, parallelogram):
+//     Reads apply-current.json to derive the required-page set (target_pages +
+//     resolution text references). Compares against .wiki/apply-changes.txt + git
+//     status. If any required page was NOT modified, writes "uncertain: <page>
+//     required by the resolution was not modified" to apply-semantic-verdict.txt
+//     and routes to requeue — no LLM call needed. This deterministically catches
+//     the "named page was simply skipped" incompleteness class.
+//
+//   Layer 2 — LLM SEMANTIC CHECK (box node):
+//     Only reached when the coverage check passes. Verifies that the pages that
+//     WERE changed contain the correct, complete, semantically-intended content.
+//     Catches "all pages touched but the change is wrong" — a judgment a script
+//     cannot make. Either gate returning uncertain → item requeued as
+//     applied_uncertain rather than sealed as applied.
 //
 // IDEMPOTENCY: items with status == "applied" are skipped by next_item.
 // Re-running the pipeline is safe; completed items are never double-applied.
@@ -26,8 +36,10 @@
 //   start -> next_item -> has_more
 //     has_more --EMPTY--> done
 //     has_more --ITEM--> apply -> apply_verify -> apply_gate1
-//       apply_gate1 --clean--> apply_semantic_check -> check_verdict -> apply_gate2
-//       apply_gate1 --dirty--> apply                          (structural retry)
+//       apply_gate1 --clean--> coverage_check -> coverage_gate
+//         coverage_gate --all_covered-->  apply_semantic_check -> check_verdict -> apply_gate2
+//         coverage_gate --missing_pages-> requeue               (verdict already written)
+//       apply_gate1 --dirty--> apply                            (structural retry)
 //       apply_gate2 --ok--------> mark_applied -> next_item
 //       apply_gate2 --uncertain--> requeue -> next_item
 
@@ -75,9 +87,31 @@ digraph WikiApplyResolutions {
     ]
     apply_gate1 [shape=diamond]
 
-    // Step 4 -- Semantic check (LLM box): verifies the apply accomplished the
-    // FULL intent of the resolution. Reads ONLY the git-status-changed pages +
-    // the original resolution intent. Does NOT fix anything -- only judges.
+    // Step 3a -- Coverage check (deterministic, parallelogram):
+    // Layer 1 of the two-layer semantic gate — the deterministic required-page
+    // guard.  Reads apply-current.json to derive the required-page set
+    // (target_pages + explicit page references in the resolution text).
+    // Compares against .wiki/apply-changes.txt (written by the apply LLM node)
+    // + git status --short team-knowledge/.
+    // If any required page is MISSING from the changed set:
+    //   - writes "uncertain: <page> required by the resolution was not modified"
+    //     to .wiki/apply-semantic-verdict.txt
+    //   - prints "missing_pages"  -> routes directly to requeue
+    // If all required pages are covered:
+    //   - prints "all_covered"  -> proceeds to the LLM semantic check
+    // This guard deterministically closes the "named page simply skipped" class
+    // without any LLM involvement.  Only pages that ARE changed proceed to the
+    // LLM for semantic-correctness judgment.
+    coverage_check [
+        shape=parallelogram,
+        tool_command="$PYBIN $HELPER coverage_check"
+    ]
+    coverage_gate [shape=diamond]
+
+    // Step 4 -- Semantic check (LLM box): Layer 2 of the semantic gate.
+    // Only reached when the coverage check passes (all required pages were
+    // actually modified).  Verifies that the changed pages contain the correct,
+    // complete, semantically-intended content.  Does NOT fix anything — judges only.
     // Writes .wiki/apply-semantic-verdict.txt with exactly:
     //   "ok"  -- if complete and correct
     //   "uncertain: <one-line reason>"  -- if incomplete or semantically wrong
@@ -122,8 +156,12 @@ digraph WikiApplyResolutions {
 
     apply -> apply_verify
     apply_verify -> apply_gate1
-    apply_gate1 -> apply_semantic_check [condition="context.tool.last_line=clean", weight=10]
-    apply_gate1 -> apply                [condition="context.tool.last_line=dirty",  weight=5]
+    apply_gate1 -> coverage_check [condition="context.tool.last_line=clean", weight=10]
+    apply_gate1 -> apply          [condition="context.tool.last_line=dirty",  weight=5]
+
+    coverage_check -> coverage_gate
+    coverage_gate -> apply_semantic_check [condition="context.tool.last_line=all_covered",   weight=10]
+    coverage_gate -> requeue              [condition="context.tool.last_line=missing_pages", weight=5]
 
     apply_semantic_check -> check_verdict
     check_verdict -> apply_gate2
