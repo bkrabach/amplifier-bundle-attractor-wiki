@@ -1,11 +1,11 @@
 bundle:
   name: wiki-agent-anthropic
-  version: 0.3.0
+  version: 0.3.1
   description: >
     Attractor Anthropic agent for the wiki pipelines. Runs SCHEMA-DRIVEN: the
     load-bearing contract (status discipline, entity types, cross-ref rules) lives
     in the project's .wiki/context/schema.md, which the box nodes read via their
-    filesystem tools. No llm-wiki bundle orientation is wired in — see the note below.
+    filesystem tools.
 
 # PIPELINE portability (PROVEN): pull the attractor agent base by git URL so the
 # pipeline runs with ZERO dependency on workspace-sibling checkouts. Verified by a
@@ -14,19 +14,23 @@ bundle:
 includes:
   - bundle: git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=agents/attractor-agent-anthropic.yaml
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Why no llm-wiki orientation here (decided by evidence, two findings):
-#   1. It can't be delivered anyway. The attractor spawn path (loop-agent) drops ALL
-#      profile system-prompt content — both `context.include` AND a markdown-body
-#      `instruction:` were proven non-delivering via sentinel tests. (Upstream bug,
-#      written up in UPSTREAM-ISSUE-context-include.md.) Only per-node prompt text
-#      reaches a box node.
-#   2. It isn't worth delivering. A matched A/B (orientation prepended to every node
-#      prompt — the one channel that DOES deliver — vs not) showed NO status-calibration
-#      improvement: deterministic status-honesty oracle = 0 errors both arms, judge = tie.
-#      The settled/working/unsettled discipline lives in schema.md, which both arms
-#      already read via tools; the orientation text doesn't even contain that vocabulary.
-# So the agent is intentionally schema-driven. Don't re-add orientation to chase the
-# status caveat — the lever is the schema + the deterministic status-honesty gate in
-# verify.sh, not orientation delivery.
-# ───────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────────
+# Layer-1 base context (nlspec §6.1: "Provider-specific base instructions").
+#
+# DELIVERY: context.include is delivered after PR #64 was merged to
+# microsoft/amplifier-bundle-attractor. loop-agent's AgentOrchestrator.execute()
+# now resolves the context._system_prompt_factory before creating the session, so
+# the file content becomes session_config.system_prompt (Layer 1).
+# Without this, the loop-agent logs "Layer-1 base prompt is empty" on every LLM
+# call (~20 times per ingest) and falls back to the stub "You are a coding agent."
+#
+# CONTENT NOTE: This is role clarity + critical invariants, NOT llm-wiki
+# orientation docs. A matched A/B (orientation prepended to node prompts vs not)
+# showed NO status-calibration improvement; the settled/working/unsettled discipline
+# lives in schema.md which both arms read via tools. The lever is the schema +
+# verify.sh gate, not orientation delivery. The comment "can't be delivered anyway"
+# in earlier versions was correct before PR #64; it no longer applies.
+# ────────────────────────────────────────────────────────────────────────────────
+context:
+  include:
+    - context/wiki-agent-base-context.md

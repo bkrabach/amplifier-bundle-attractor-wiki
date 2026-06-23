@@ -823,7 +823,7 @@ async def ingest_folder(
     if verify_sh.exists():
         try:
             r = subprocess.run(
-                [str(verify_sh)],
+                [str(verify_sh), package],
                 cwd=wiki_dir,
                 capture_output=True,
                 text=True,
