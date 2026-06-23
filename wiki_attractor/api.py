@@ -162,6 +162,44 @@ def _is_binary(data: bytes) -> bool:
     return False
 
 
+def _classify_file_path(file_path: Path) -> str | None:
+    """Check whether *file_path* is a supported prose input.
+
+    Returns:
+        ``None``            if the file is supported prose (safe to ingest).
+        A short reason str  if the file is unsupported (skip / reject).
+
+    This is the pure-classification companion to ``_classify_source``: same
+    detection logic, but takes an absolute ``Path`` directly rather than
+    ``(wiki_dir, source)``.  Used by :func:`ingest_folder` to triage files
+    in a source folder *before* staging them into ``raw/``.
+
+    Key invariant: a ``.md`` file that contains fenced code blocks is still
+    treated as prose — the *extension*, not the content, is the signal.
+    """
+    ext = file_path.suffix.lower()
+
+    # Fast path: explicitly supported prose extension → allow immediately.
+    if ext in _PROSE_EXTENSIONS:
+        return None
+
+    # Binary sniff: read up to 8 KB and check for binary indicators.
+    try:
+        header = file_path.read_bytes()[:8192]
+    except OSError:
+        return None  # Unreadable; let the pipeline surface the proper error.
+
+    if _is_binary(header):
+        return "binary file"
+
+    # Source-code extension check.
+    if ext in _CODE_EXTENSIONS:
+        return f"source code ({ext})"
+
+    # Default: allow (conservative; ambiguous extensions pass through).
+    return None
+
+
 def _classify_source(wiki_dir: Path, source: str) -> None:
     """Verify *source* is a supported prose input type.
 
@@ -218,6 +256,11 @@ def _classify_source(wiki_dir: Path, source: str) -> None:
 _PKG = Path(__file__).resolve().parent
 _REVIEW_HELPER = _PKG / "review_queue.py"
 _APPLY_HELPER = _PKG / "apply_resolutions_queue.py"
+
+# The attractor pipeline engine writes its checkpoint here.  Sequential calls
+# to run_pipeline() with different DOT graphs (different $source subs) will
+# hit a CheckpointMismatchError unless cleared between runs.
+_CHECKPOINT_PATH = Path("/tmp/attractor-pipeline/checkpoint.json")
 
 
 # ---------------------------------------------------------------------------
@@ -592,3 +635,221 @@ async def query_save(
         else "partial"
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Batch / folder ingest.
+# ---------------------------------------------------------------------------
+
+
+async def ingest_folder(
+    source_folder: str | Path,
+    wiki_dir: str | Path,
+    *,
+    package: str = "wiki",
+    brief: str = "knowledge base",
+) -> dict[str, Any]:
+    """Batch-ingest all supported prose files from a folder into a wiki.
+
+    Walks *source_folder* recursively in sorted, deterministic order.  Each
+    file is **triaged** (supported prose vs. unsupported code/binary) BEFORE
+    any LLM work starts.  Unsupported files are **loudly reported** and
+    skipped — never silently dropped and never silently mined as prose.
+
+    If *wiki_dir* does not exist or is not yet initialized, a new wiki is
+    scaffolded there first (using *package* and *brief*).  If it already is
+    an initialized wiki, files are ingested additively into it.
+
+    Each supported file is staged into ``raw/``, ingested through the full
+    ingest pipeline (mine → write → reconcile → weave → verify), then
+    archived automatically by the pipeline.  Files are processed
+    **sequentially** in sorted order.
+
+    The attractor checkpoint at ``/tmp/attractor-pipeline/checkpoint.json``
+    is cleared before each ingest call so that sequential runs with different
+    DOT graphs (different ``$source`` subs) do not hit a
+    ``CheckpointMismatchError``.
+
+    Args:
+        source_folder: Path to a directory of raw source files.
+        wiki_dir:      Path to the wiki repository root (created + initialized
+                       if it does not exist).
+        package:       Package directory name for the wiki (used only when
+                       init is needed, e.g. ``team-knowledge``).
+                       Default: ``"wiki"``.
+        brief:         One-line domain brief for the wiki (used only when init
+                       is needed, e.g. ``"product team strategy KB"``).
+                       Default: ``"knowledge base"``.
+
+    Returns:
+        A summary dict with keys:
+
+        ``status``
+            ``"success"`` if all supported files were ingested,
+            ``"partial"`` if some failed, ``"fail"`` if none succeeded.
+        ``wiki_dir``
+            Absolute path to the wiki repository root.
+        ``total_files``
+            Total files found in *source_folder* (all types combined).
+        ``ingested``
+            List of paths relative to *source_folder* for files ingested OK.
+        ``skipped``
+            List of ``{file, reason}`` dicts for unsupported files.
+        ``failed``
+            List of ``{file, error}`` dicts for files that errored.
+        ``verify_status``
+            First line of verify.sh output, e.g.
+            ``"verify: clean (N page(s) checked)"``.
+
+    Raises:
+        ValueError: if *source_folder* is not a directory.
+    """
+    import subprocess  # noqa: PLC0415 (local import avoids always-importing subprocess)
+
+    source_folder = Path(source_folder).resolve()
+    wiki_dir = Path(wiki_dir).resolve()
+
+    if not source_folder.is_dir():
+        raise ValueError(f"source_folder is not a directory: {source_folder}")
+
+    # ── Step 1: Walk + triage in deterministic order (no LLM yet) ────────────
+    all_files: list[Path] = sorted(
+        fp for fp in source_folder.rglob("*") if fp.is_file()
+    )
+
+    supported: list[Path] = []
+    skipped: list[dict[str, str]] = []
+
+    for fp in all_files:
+        reason = _classify_file_path(fp)
+        if reason is None:
+            supported.append(fp)
+        else:
+            skipped.append(
+                {
+                    "file": str(fp.relative_to(source_folder)),
+                    "reason": reason,
+                }
+            )
+
+    # ── Step 2: Init wiki if not already initialized ──────────────────────────
+    schema_path = wiki_dir / ".wiki" / "context" / "schema.md"
+    if not schema_path.exists():
+        init_result = await init(str(wiki_dir), package, brief)
+        if init_result.get("status") not in ("success", "completed"):
+            return {
+                "status": "fail",
+                "wiki_dir": str(wiki_dir),
+                "total_files": len(all_files),
+                "ingested": [],
+                "skipped": skipped,
+                "failed": [],
+                "verify_status": "not run (init failed)",
+                "failure_reason": (
+                    "Wiki init failed: "
+                    + str(init_result.get("failure_reason", "unknown"))
+                ),
+            }
+
+    # ── Step 3: Ingest each supported file ────────────────────────────────────
+    raw_dir = wiki_dir / "raw"
+    raw_dir.mkdir(exist_ok=True)
+
+    ingested: list[str] = []
+    failed: list[dict[str, str]] = []
+
+    for src_path in supported:
+        # Resolve a unique staged filename in raw/ to avoid clobbering.
+        # If a file with the same name already exists in raw/ or raw/archive/
+        # (already in flight or already ingested), prepend an incrementing counter.
+        base_name = src_path.name
+        staged_name = base_name
+        counter = 0
+        while (raw_dir / staged_name).exists() or (
+            raw_dir / "archive" / staged_name
+        ).exists():
+            counter += 1
+            staged_name = f"{counter}-{base_name}"
+
+        staged = raw_dir / staged_name
+        try:
+            staged.write_bytes(src_path.read_bytes())
+        except OSError as exc:
+            failed.append(
+                {
+                    "file": str(src_path.relative_to(source_folder)),
+                    "error": f"Could not stage file in raw/: {exc}",
+                }
+            )
+            continue
+
+        # Clear any stale checkpoint from the previous pipeline run.
+        # Sequential ingest() calls use the same DOT template with different
+        # $source substitutions, giving different graph hashes — the attractor
+        # engine rejects a mismatched checkpoint rather than silently
+        # double-applying side-effecting nodes.
+        _CHECKPOINT_PATH.unlink(missing_ok=True)
+
+        try:
+            result = await ingest(str(wiki_dir), staged_name)
+            if result.get("status") in ("success", "completed"):
+                ingested.append(str(src_path.relative_to(source_folder)))
+            else:
+                failed.append(
+                    {
+                        "file": str(src_path.relative_to(source_folder)),
+                        "error": (
+                            "ingest pipeline: "
+                            + str(result.get("failure_reason", "unknown failure"))
+                        ),
+                    }
+                )
+                # Clean up the staged file if the pipeline did not archive it.
+                if staged.exists():
+                    staged.unlink(missing_ok=True)
+        except ValueError as exc:
+            failed.append(
+                {
+                    "file": str(src_path.relative_to(source_folder)),
+                    "error": str(exc),
+                }
+            )
+            if staged.exists():
+                staged.unlink(missing_ok=True)
+
+    # ── Step 4: Final verify.sh ───────────────────────────────────────────────
+    verify_status = "not run"
+    verify_sh = wiki_dir / ".wiki" / "scripts" / "verify.sh"
+    if verify_sh.exists():
+        try:
+            r = subprocess.run(
+                [str(verify_sh)],
+                cwd=wiki_dir,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            stdout = (r.stdout or "").strip()
+            stderr = (r.stderr or "").strip()
+            first_line = (stdout or stderr or "no output").split("\n")[0]
+            verify_status = first_line
+        except subprocess.TimeoutExpired:
+            verify_status = "verify.sh timed out"
+        except Exception as exc:  # noqa: BLE001
+            verify_status = f"verify.sh error: {exc}"
+
+    # ── Step 5: Summary ───────────────────────────────────────────────────────
+    if failed:
+        overall_status = "partial" if ingested else "fail"
+    else:
+        overall_status = "success"
+
+    return {
+        "status": overall_status,
+        "wiki_dir": str(wiki_dir),
+        "total_files": len(all_files),
+        "ingested": ingested,
+        "skipped": skipped,
+        "failed": failed,
+        "verify_status": verify_status,
+    }

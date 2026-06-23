@@ -165,6 +165,44 @@ _BUILDERS = {"session": _make_session_command, "engine": _make_engine_command}
 # ---------------------------------------------------------------------------
 
 
+def _print_ingest_folder_result(result: dict[str, Any]) -> None:
+    """Print the ingest-folder summary."""
+    status = result.get("status", "unknown")
+    wiki = result.get("wiki_dir", "")
+    total = result.get("total_files", 0)
+    ingested = result.get("ingested", [])
+    skipped = result.get("skipped", [])
+    failed = result.get("failed", [])
+    verify = result.get("verify_status", "")
+
+    click.echo("")
+    click.echo("========== INGEST-FOLDER SUMMARY ==========")
+    click.echo(f"status         : {status}")
+    click.echo(f"wiki           : {wiki}")
+    click.echo(f"total files    : {total}")
+    click.echo("")
+
+    click.echo(f"  INGESTED ({len(ingested)} file(s)):")
+    if ingested:
+        for f in ingested:
+            click.echo(f"    + {f}")
+    else:
+        click.echo("    (none)")
+
+    if skipped:
+        click.echo(f"\n  SKIPPED — unsupported input type ({len(skipped)} file(s)):")
+        for s in skipped:
+            click.echo(f"    x {s['file']}  [{s['reason']}]")
+
+    if failed:
+        click.echo(f"\n  FAILED ({len(failed)} file(s)):")
+        for f in failed:
+            click.echo(f"    ! {f['file']}  — {f['error']}")
+
+    click.echo(f"\nverify.sh: {verify}")
+    click.echo("==========================================")
+
+
 def _print_query_save_result(result: dict[str, Any]) -> None:
     """Print query_save result: cited answer then loop-closure summary."""
     query_r = result.get("query", {})
@@ -292,6 +330,143 @@ def main(ctx: click.Context, wiki_dir: Path | None) -> None:
             click.echo(f"  {spec.name:<8} {spec.summary}")
 
 
+# ---------------------------------------------------------------------------
+# Custom ingest-folder command (meta-command: orchestrates multiple pipelines).
+#
+# Not in the registry because it is not a single .dot pipeline; it calls
+# api.ingest_folder(), which calls init() + multiple ingest() calls internally.
+# ---------------------------------------------------------------------------
+
+
+def _make_ingest_folder_cli_command() -> click.Command:
+    """Build the `ingest-folder` command."""
+
+    @click.command(
+        name="ingest-folder",
+        help=(
+            "Batch-ingest all prose files from SOURCE_FOLDER into a wiki. "
+            "Triages each file first (prose vs. code/binary); skipped files are "
+            "LOUDLY reported with reasons. Initializes the target wiki if it does "
+            "not already exist. Each supported file is ingested through the full "
+            "pipeline (mine -> write -> reconcile -> weave -> verify)."
+        ),
+    )
+    @click.argument(
+        "source_folder",
+        type=click.Path(exists=True, file_okay=False, path_type=Path),
+    )
+    @click.option(
+        "--target",
+        "wiki_dir",
+        type=click.Path(file_okay=False, path_type=Path),
+        default=None,
+        help=(
+            "Wiki repo root to build into (created + initialized if it does not "
+            "exist). Default: current directory."
+        ),
+    )
+    @click.option(
+        "--package",
+        default="wiki",
+        show_default=True,
+        help=(
+            "Wiki package name for auto-init "
+            "(only used when --target is not yet an initialized wiki)."
+        ),
+    )
+    @click.option(
+        "--brief",
+        default="knowledge base",
+        show_default=True,
+        help=(
+            "One-line domain description for auto-init "
+            "(only used when --target is not yet an initialized wiki)."
+        ),
+    )
+    def _cmd(
+        source_folder: Path,
+        wiki_dir: Path | None,
+        package: str,
+        brief: str,
+    ) -> None:
+        if wiki_dir is None:
+            wiki_dir = Path.cwd()
+
+        source_folder = source_folder.resolve()
+        wiki_dir = wiki_dir.resolve()
+
+        # ── Pre-flight: scan and print triage plan BEFORE any LLM work ───────
+        all_files = sorted(fp for fp in source_folder.rglob("*") if fp.is_file())
+        supported_pre: list[Path] = []
+        skipped_pre: list[tuple[Path, str]] = []
+        for fp in all_files:
+            reason = _api._classify_file_path(fp)  # type: ignore[attr-defined]
+            if reason is None:
+                supported_pre.append(fp)
+            else:
+                skipped_pre.append((fp, reason))
+
+        click.echo("")
+        click.echo("[wiki-attractor] ingest-folder")
+        click.echo(f"  source  : {source_folder}")
+        click.echo(f"  target  : {wiki_dir}")
+        click.echo("")
+        click.echo(f"  TRIAGE  : {len(all_files)} file(s) found in source folder")
+        click.echo(f"  → {len(supported_pre)} file(s) WILL BE ingested:")
+        if supported_pre:
+            for fp in supported_pre:
+                click.echo(f"        {fp.relative_to(source_folder)}")
+        else:
+            click.echo("        (none — nothing to ingest)")
+
+        if skipped_pre:
+            click.echo(
+                f"  → {len(skipped_pre)} file(s) WILL BE SKIPPED (unsupported type):"
+            )
+            for fp, reason in skipped_pre:
+                click.echo(f"        {fp.relative_to(source_folder)}  [{reason}]")
+
+        click.echo("")
+
+        if not supported_pre:
+            click.echo(
+                "ERROR: No supported prose files found in the source folder.\n"
+                "wiki-attractor ingests .md, .txt, .rst, transcripts, and other\n"
+                "plain-text prose.  Source code and binary files are not supported.",
+                err=True,
+            )
+            sys.exit(1)
+
+        schema_path = wiki_dir / ".wiki" / "context" / "schema.md"
+        if not schema_path.exists():
+            click.echo(
+                f"  Target wiki not yet initialized — will init with "
+                f"package='{package}', brief='{brief}'."
+            )
+            click.echo("")
+
+        click.echo(f"  Starting batch ingest of {len(supported_pre)} file(s)…")
+        click.echo("")
+
+        try:
+            result = asyncio.run(
+                _api.ingest_folder(
+                    source_folder,
+                    wiki_dir,
+                    package=package,
+                    brief=brief,
+                )
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        _print_ingest_folder_result(result)
+        # Exit 0 for success or partial (some ingested), 1 only for total fail.
+        sys.exit(0 if result.get("status") in ("success", "partial") else 1)
+
+    return _cmd
+
+
 # Register every pipeline as a command.
 # `query` is skipped here — it needs --save/--no-save support and uses a
 # custom builder below.  All other commands are fully auto-generated.
@@ -302,6 +477,9 @@ for _spec in REGISTRY.values():
 
 # Register the query command with --save/--no-save support (compounding loop).
 main.add_command(_make_query_cli_command())
+
+# Register the ingest-folder batch command (orchestrates multiple pipeline runs).
+main.add_command(_make_ingest_folder_cli_command())
 
 
 if __name__ == "__main__":
