@@ -7,10 +7,13 @@ validation), and delegates to the bespoke wiki_attractor API
 (wiki_attractor.api) for each command.
 
 Layer contract:
-  .dot files    — ALL real work; named as their command; portable drop-ins
-  api.py        — bespoke wiki-attractor typed API; one named fn per command
+  .dot files    — knowledge-mining work; command-named; portable drop-ins
+  api.py        — bespoke wiki-attractor typed API; one named fn per command;
+                  ingest-folder and query_save live here (no .dot, by design)
   runner.py     — ONLY code that stands up + invokes the attractor engine
   cli.py        — near-zero wrapper: arg parsing, pre-flight, print result
+
+See CAPABILITIES.md for the authoritative list of all 9 CLI commands.
 """
 
 from __future__ import annotations
@@ -61,7 +64,8 @@ def _print_result(name: str, result: dict[str, Any]) -> int:
 #
 # Each entry calls the bespoke named API function for that command, keeping
 # the CLI data-driven while flowing entirely through the typed API layer.
-# Adding a 7th command: one REGISTRY entry + one lambda here + one .dot file.
+# Adding a new .dot-backed command: one REGISTRY entry + one lambda here + one .dot file.
+# ingest-folder and query --save are Python-only meta-commands (no .dot); see below.
 # ---------------------------------------------------------------------------
 
 _COMMAND_DISPATCH: dict[str, Any] = {

@@ -2,9 +2,10 @@ bundle:
   name: attractor-wiki-behavior
   version: 0.1.0
   description: >
-    Mounts the 6 wiki-attractor tools (wiki_ingest, wiki_query, wiki_lint,
-    wiki_publish, wiki_init, wiki_review) and thin orientation context.
-    Compose onto any bundle to add wiki automation tools.
+    Mounts the wiki tools (wiki_ingest, wiki_query, wiki_lint, wiki_publish,
+    wiki_init, wiki_review, wiki_apply_resolutions — see CAPABILITIES.md for the
+    authoritative list) and thin orientation context. Compose onto any bundle to
+    add wiki automation tools.
 
 # source: is relative to THIS FILE's directory (behaviors/).
 # ../modules/tool-wiki resolves to <repo-root>/modules/tool-wiki.

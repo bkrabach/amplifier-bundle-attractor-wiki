@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wiki-attractor"
-version = "0.1.0"
+version = "0.3.0"
 description = "Run amplifier-bundle-llm-wiki workflows as attractor pipelines (thin click wrapper over an AmplifierSession runner)."
 requires-python = ">=3.11"
 # Only the wrapper's own hard dependency is declared. The heavy runtime --

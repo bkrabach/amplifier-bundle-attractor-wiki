@@ -4,12 +4,12 @@ PROOF SCRIPT — validates the proper bundle structure per the foundation-expert
 
 (A) ROOT bundle (bundle.md):
     - Thin root: name=attractor-wiki, version=0.2.0, includes only (no tools block)
-    - 6 tools present after composition (from behavior, via bundle._pending_context / mount)
+    - 7 tools present after composition (from behavior, via bundle._pending_context / mount)
     - awareness context in _pending_context (from behavior context.include)
     - full guide @-mentioned in root body (bundle.instruction)
 
 (B) BEHAVIOR ALONE (behaviors/attractor-wiki.yaml):
-    - name=attractor-wiki-behavior, 6 tools present
+    - name=attractor-wiki-behavior, 7 tools present
     - awareness context in _pending_context
     - full guide NOT in instruction (not in behavior body)
 
@@ -28,7 +28,8 @@ BUNDLE_MD = REPO / "bundle.md"
 BEHAVIOR_YAML = REPO / "behaviors" / "attractor-wiki.yaml"
 
 EXPECTED_TOOLS = {"wiki_ingest", "wiki_query", "wiki_lint",
-                  "wiki_publish", "wiki_init", "wiki_review"}
+                  "wiki_publish", "wiki_init", "wiki_review",
+                  "wiki_apply_resolutions"}
 AWARENESS_FILE = "attractor-wiki-awareness.md"
 FULL_GUIDE = "using-attractor-wiki"
 
@@ -106,7 +107,7 @@ async def main() -> None:
     root_awareness_ok = any(AWARENESS_FILE in k for k in root["pending_keys"])
     root_guide_ok = FULL_GUIDE in root["instruction"]
 
-    print(f"\n[ROOT] ✓ 6 tools         : {'PASS' if root_tools_ok else 'FAIL'}")
+    print(f"\n[ROOT] ✓ 7 tools         : {'PASS' if root_tools_ok else 'FAIL'}")
     if not root_tools_ok:
         print(f"  missing={EXPECTED_TOOLS - root_tool_set}, extra={root_tool_set - EXPECTED_TOOLS}")
     print(f"[ROOT] ✓ awareness ctx   : {'PASS — in _pending_context' if root_awareness_ok else 'FAIL'}")
@@ -146,7 +147,7 @@ async def main() -> None:
     beh_awareness_ok = any(AWARENESS_FILE in k for k in beh["pending_keys"])
     beh_no_guide_ok = FULL_GUIDE not in beh["instruction"]
 
-    print(f"\n[BEHAVIOR] ✓ 6 tools          : {'PASS' if beh_tools_ok else 'FAIL'}")
+    print(f"\n[BEHAVIOR] ✓ 7 tools          : {'PASS' if beh_tools_ok else 'FAIL'}")
     if not beh_tools_ok:
         print(f"  missing={EXPECTED_TOOLS - beh_tool_set}, extra={beh_tool_set - EXPECTED_TOOLS}")
     print(f"[BEHAVIOR] ✓ awareness ctx    : {'PASS — in _pending_context' if beh_awareness_ok else 'FAIL'}")

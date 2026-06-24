@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ROB GATE — prove load_bundle() on bundle.md mounts all 6 wiki tools.
+ROB GATE — prove load_bundle() on bundle.md mounts all 7 wiki tools.
 Run with: /home/bkrabach/.local/share/uv/tools/amplifier/bin/python examples/prove_bundle.py
 """
 
@@ -83,12 +83,13 @@ async def main() -> None:
             "wiki_publish",
             "wiki_init",
             "wiki_review",
+            "wiki_apply_resolutions",
         }
         found = set(tool_names)
         missing = expected - found
         extra = found - expected
         if not missing and not extra:
-            print("\n[prove] ✓ ALL 6 WIKI TOOLS PRESENT — bundle.md PROVEN")
+            print("\n[prove] ✓ ALL 7 WIKI TOOLS PRESENT — bundle.md PROVEN")
         else:
             print(f"\n[prove] ✗  missing={missing}  extra={extra}")
     else:
