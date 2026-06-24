@@ -1,15 +1,16 @@
 # attractor-wiki — tools mounted
 
-You have 6 wiki automation tools:
+You have 7 wiki automation tools:
 
 | Tool | Purpose |
 |---|---|
-| `wiki_ingest` | Mine a source from `raw/` into the wiki (mine → write → reconcile → verify) |
+| `wiki_ingest` | Mine a source from `raw/` into the wiki (mine → write_pages → verify → reconcile → provenance_audit → enforce_attribution → weave → review → verify2 → archive) |
 | `wiki_query` | Read-only Q&A, index-first, cited answer written to `.wiki/query-answer.md` |
 | `wiki_lint` | Read-only health check: `verify.sh` + LLM suggestions → `.wiki/lint-report.md` |
 | `wiki_publish` | Zip the wiki package via `.wiki/scripts/publish.sh` → `.wiki/dist/` |
 | `wiki_init` | Scaffold a new pure-markdown 4-type wiki from a policy brief |
 | `wiki_review` | Walk the `flag-queue.json` TODO-VERIFY queue (confirm / correct / promote) |
+| `wiki_apply_resolutions` | Apply queued review-queue resolutions to the wiki (LLM apply + deterministic coverage gate) |
 
 All tools require `wiki_dir` (absolute path to the wiki repo root).
 `wiki_query` additionally requires `question`; `wiki_ingest` requires `source` (filename in `raw/`).
