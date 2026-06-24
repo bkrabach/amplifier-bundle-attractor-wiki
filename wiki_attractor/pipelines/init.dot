@@ -34,9 +34,12 @@ digraph WikiInit {
     done  [shape=Msquare]
 
     // Step 1 — plant canonical scripts (deterministic). Byte-identical, not authored.
+    // classify_source.py is the shared input-type guard used by both the .dot pipeline
+    // (classify node in ingest.dot) and api.py (subprocess call). Planting it here
+    // ensures it travels with every wiki initialised from this bundle.
     copy_assets [
         shape=parallelogram,
-        tool_command="mkdir -p .wiki/scripts .wiki/context raw && cp $ASSETS/verify.sh .wiki/scripts/verify.sh && cp $ASSETS/publish.sh .wiki/scripts/publish.sh && chmod +x .wiki/scripts/verify.sh .wiki/scripts/publish.sh && touch raw/.gitkeep && printf planted"
+        tool_command="mkdir -p .wiki/scripts .wiki/context raw && cp $ASSETS/verify.sh .wiki/scripts/verify.sh && cp $ASSETS/publish.sh .wiki/scripts/publish.sh && cp $ASSETS/classify_source.py .wiki/scripts/classify_source.py && chmod +x .wiki/scripts/verify.sh .wiki/scripts/publish.sh && touch raw/.gitkeep && printf planted"
     ]
 
     // Step 2 — author the domain-specific scaffold (LLM) from the brief.

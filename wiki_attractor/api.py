@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,13 @@ from .registry import ASSETS_DIR, REGISTRY
 from .runner import run_pipeline
 
 # ---------------------------------------------------------------------------
-# Input-type classifier — deterministic FAIL-LOUD guard for unsupported input.
+# Package path constants — defined early so classify and other helpers can use them.
+# ---------------------------------------------------------------------------
+
+_PKG = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# Input-type classifier — deterministic FAIL-CLOSED guard for unsupported input.
 #
 # WHY: the schema is prose-only (outcomes/concepts/people/sources).  Pointing
 # ingest at source code or a binary file would silently mine it as prose and
@@ -37,129 +44,61 @@ from .runner import run_pipeline
 # code/binary input FAILS LOUD with an actionable message rather than
 # producing garbage.  It is intentionally conservative: when in doubt, allow.
 #
-# SCOPE (v1 stopgap):
-#   SUPPORTED  — plain-text prose: .md, .txt, .rst, transcripts, docs, notes,
-#                and anything else that passes the UTF-8 / null-byte sniff
-#                without a source-code extension.
-#   UNSUPPORTED (rejected loudly):
-#     - binary files (null bytes or UTF-8 decode failure)
-#     - source-code files (hard-deny extension list)
+# SINGLE SOURCE OF TRUTH: all classification logic lives in
+# wiki_attractor/assets/classify_source.py (stdlib-only, portable). That script
+# is planted into .wiki/scripts/ by init, so it travels with every wiki AND runs
+# as the ingest.dot classify node.  This file (api.py) calls it as a subprocess
+# so both the Python-path callers (CLI, tool-module) and the native .dot pipeline
+# use EXACTLY the same logic — zero duplication.
 #
-# Files with ambiguous extensions (.yaml, .json, .toml, etc.) are ALLOWED;
-# the conservative stance avoids rejecting legitimate structured prose exports.
+# FAIL CLOSED: any exception, missing file, subprocess error, or ambiguity →
+# REJECT.  The guard never accepts on error.
+#
+# Binary-sniff-first invariant: classify_source.py reads 8 KB before any
+# extension check, so a binary file renamed to notes.md is still rejected.
 # ---------------------------------------------------------------------------
 
-# Source-code file extensions — reject loud; no mining, ever.
-_CODE_EXTENSIONS: frozenset[str] = frozenset(
-    {
-        # Python
-        ".py",
-        ".pyw",
-        ".pyi",
-        # Rust
-        ".rs",
-        # TypeScript / JavaScript
-        ".ts",
-        ".tsx",
-        ".js",
-        ".jsx",
-        ".mjs",
-        ".cjs",
-        # Go
-        ".go",
-        # Java / JVM
-        ".java",
-        ".kt",
-        ".kts",
-        ".scala",
-        ".groovy",
-        # C / C++
-        ".c",
-        ".h",
-        ".cpp",
-        ".cc",
-        ".cxx",
-        ".hpp",
-        ".hh",
-        ".hxx",
-        # C#
-        ".cs",
-        # Ruby
-        ".rb",
-        # PHP
-        ".php",
-        # Swift / Objective-C
-        ".swift",
-        ".m",
-        # Shell
-        ".sh",
-        ".bash",
-        ".zsh",
-        ".fish",
-        # SQL
-        ".sql",
-        # Lua
-        ".lua",
-        # Perl
-        ".pl",
-        ".pm",
-        # R
-        ".r",
-        # Web components
-        ".vue",
-        ".svelte",
-        # Other languages
-        ".dart",
-        ".ex",
-        ".exs",  # Elixir
-        ".erl",  # Erlang
-        ".hs",
-        ".lhs",  # Haskell
-        ".elm",
-        ".clj",
-        ".cljs",  # Clojure
-        ".lisp",
-        ".el",  # Lisp / Emacs Lisp
-        ".tf",  # Terraform HCL
-        ".asm",
-        ".s",  # Assembly
-        ".f90",
-        ".f95",  # Fortran
-        # Notebooks
-        ".ipynb",  # Jupyter (code execution artifact)
-    }
-)
-
-# Prose extensions — always allow, skip further checks (no read needed).
-_PROSE_EXTENSIONS: frozenset[str] = frozenset(
-    {
-        ".md",
-        ".markdown",
-        ".txt",
-        ".rst",
-        ".html",
-        ".htm",
-        ".tex",
-        ".latex",
-        ".org",
-        ".adoc",
-        ".asciidoc",
-        ".wiki",
-    }
-)
+# Path to the shared classify helper (canonical source; planted to wikis by init).
+_CLASSIFY_SCRIPT: Path = _PKG / "assets" / "classify_source.py"
 
 
-def _is_binary(data: bytes) -> bool:
-    """Return True if *data* looks like binary (not UTF-8 plain text)."""
-    # Null bytes are an unambiguous binary indicator.
-    if b"\x00" in data:
-        return True
-    # UTF-8 decode failure → binary or encoding mismatch → reject.
+def _run_classify(file_path: Path) -> tuple[bool, str]:
+    """Call classify_source.py on *file_path* as a subprocess.
+
+    Returns
+    -------
+    (True,  "")
+        File is acceptable prose — safe to ingest.
+    (False, <actionable_message>)
+        File is unsupported (binary, code, unreadable, or missing).
+
+    FAIL CLOSED: any subprocess error, timeout, or exception returns
+    (False, reason) — never (True, ...).
+    """
     try:
-        data.decode("utf-8")
-    except UnicodeDecodeError:
-        return True
-    return False
+        r = subprocess.run(
+            [sys.executable, str(_CLASSIFY_SCRIPT), str(file_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if r.returncode == 0:
+            return True, ""
+        msg = (
+            r.stdout.strip()
+            or r.stderr.strip()
+            or (
+                f"Unsupported input type: {file_path.name} — "
+                "wiki-attractor ingests plain-text prose only."
+            )
+        )
+        return False, msg
+    except Exception as exc:  # noqa: BLE001
+        return False, (
+            f"Input classification error for {file_path.name}: {exc}.\n"
+            "wiki-attractor ingests plain-text prose only "
+            "(documents, transcripts, notes)."
+        )
 
 
 def _classify_file_path(file_path: Path) -> str | None:
@@ -170,34 +109,22 @@ def _classify_file_path(file_path: Path) -> str | None:
         A short reason str  if the file is unsupported (skip / reject).
 
     This is the pure-classification companion to ``_classify_source``: same
-    detection logic, but takes an absolute ``Path`` directly rather than
-    ``(wiki_dir, source)``.  Used by :func:`ingest_folder` to triage files
-    in a source folder *before* staging them into ``raw/``.
+    detection logic (delegated to the shared classify_source.py helper), but
+    takes an absolute ``Path`` directly rather than ``(wiki_dir, source)``.
+    Used by :func:`ingest_folder` to triage files in a source folder *before*
+    staging them into ``raw/``.
 
     Key invariant: a ``.md`` file that contains fenced code blocks is still
     treated as prose — the *extension*, not the content, is the signal.
+    Binary-sniff-first: binary bytes detected before extension check, so a
+    binary file renamed to .md is still rejected.
     """
-    ext = file_path.suffix.lower()
-
-    # Fast path: explicitly supported prose extension → allow immediately.
-    if ext in _PROSE_EXTENSIONS:
+    ok, msg = _run_classify(file_path)
+    if ok:
         return None
-
-    # Binary sniff: read up to 8 KB and check for binary indicators.
-    try:
-        header = file_path.read_bytes()[:8192]
-    except OSError:
-        return None  # Unreadable; let the pipeline surface the proper error.
-
-    if _is_binary(header):
-        return "binary file"
-
-    # Source-code extension check.
-    if ext in _CODE_EXTENSIONS:
-        return f"source code ({ext})"
-
-    # Default: allow (conservative; ambiguous extensions pass through).
-    return None
+    # Return a short reason (strip actionable multi-line detail for the skip list).
+    first_line = msg.split("\n")[0] if msg else "unsupported input type"
+    return first_line
 
 
 def _classify_source(wiki_dir: Path, source: str) -> None:
@@ -208,52 +135,22 @@ def _classify_source(wiki_dir: Path, source: str) -> None:
 
     Key invariant: a .md file that *contains* fenced code blocks is still
     treated as prose — the *extension*, not the content, is the signal.
+    Binary-sniff-first: a binary file renamed to .md is still rejected.
+
+    Delegates to the shared classify_source.py helper (stdlib-only script
+    planted into .wiki/scripts/ by init and used as the ingest.dot classify
+    node).  Single source of classification truth — no logic duplication.
 
     Runs BEFORE any LLM work so code/binary input never produces silent
     garbage entity pages.  Non-zero exit via the ValueError → ClickException
     chain at the CLI layer; same ValueError surfaces in the tool-module layer.
     """
     src = wiki_dir / "raw" / source
-    ext = src.suffix.lower()
-
-    # ── Fast path: explicitly supported prose extension → allow immediately ─
-    if ext in _PROSE_EXTENSIONS:
-        return
-
-    # ── Binary sniff: read up to 8 KB and check for binary indicators ───────
-    try:
-        header = src.read_bytes()[:8192]
-    except OSError:
-        # Unreadable file → let the pipeline surface the proper error.
-        return
-
-    if _is_binary(header):
-        raise ValueError(
-            f"Unsupported input: raw/{source} is a binary file.\n"
-            "wiki-attractor ingests plain-text prose only "
-            "(documents, transcripts, notes).\n"
-            "Binary files (images, PDFs, executables, archives, etc.) "
-            "are not supported. Remove or convert it to plain text first."
-        )
-
-    # ── Source-code extension check ──────────────────────────────────────────
-    if ext in _CODE_EXTENSIONS:
-        raise ValueError(
-            f"Unsupported input: raw/{source} looks like source code ({ext}).\n"
-            "wiki-attractor v1 ingests prose (documents, transcripts, notes);\n"
-            "source code files are not yet supported — they need a codebase schema\n"
-            "that the current four-type schema (outcomes/concepts/people/sources)\n"
-            "does not provide. Remove it, or convert it to a prose description\n"
-            "of the code's purpose, design decisions, or API contract."
-        )
-
-    # ── Default: allow ───────────────────────────────────────────────────────
-    # Ambiguous extensions (.yaml, .json, .toml, etc.) pass through.
-    # Being conservative here avoids rejecting legitimate structured-prose
-    # exports (Q&A JSON dumps, YAML-frontmatter docs, etc.).
+    ok, msg = _run_classify(src)
+    if not ok:
+        raise ValueError(msg)
 
 
-_PKG = Path(__file__).resolve().parent
 _REVIEW_HELPER = _PKG / "review_queue.py"
 _APPLY_HELPER = _PKG / "apply_resolutions_queue.py"
 
@@ -839,7 +736,12 @@ async def ingest_folder(
             verify_status = f"verify.sh error: {exc}"
 
     # ── Step 5: Summary ───────────────────────────────────────────────────────
-    if failed:
+    if not ingested and not failed:
+        # Empty folder or all files were unsupported/skipped — nothing was ingested.
+        # Return a distinct status so callers can detect this case without inspecting
+        # the ingested/skipped lists.  "success" would be misleading here.
+        overall_status = "no_supported_sources"
+    elif failed:
         overall_status = "partial" if ingested else "fail"
     else:
         overall_status = "success"

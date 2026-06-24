@@ -9,7 +9,14 @@
 //   diamond       = pure router
 //
 // Pipeline phases (in order):
-//   mine → write_pages → verify → reconcile → provenance_audit → enforce_attribution → weave → review → verify2 → archive
+//   classify → mine → write_pages → verify → reconcile → provenance_audit → enforce_attribution → weave → review → verify2 → archive
+//
+// FAIL-CLOSED INPUT GUARD (classify node):
+//   The classify node runs .wiki/scripts/classify_source.py on the source file BEFORE
+//   any LLM work.  It binary-sniffs first (NUL bytes / UTF-8 failure → reject) then
+//   checks extension (code → reject, prose → accept).  FAIL CLOSED: missing script,
+//   crashed helper, or any fault → last_line != CLASSIFY_OK → classify_gate routes to
+//   done WITHOUT reaching mine.  There is NO path from a non-accept to mine.
 //
 // L3 PERFORMANCE TRADEOFF (honest, not a fidelity virtue): reconcile,
 // provenance_audit, weave, and review are all SCOPED to the changed-page
@@ -41,6 +48,21 @@ digraph WikiIngest {
         shape=parallelogram,
         tool_command="test -f .wiki/context/schema.md && ls raw/ >/dev/null 2>&1 && printf ready || printf uninitialized"
     ]
+
+    // Step 1b — FAIL-CLOSED INPUT GUARD (deterministic, no LLM).
+    // Runs .wiki/scripts/classify_source.py on the source BEFORE any LLM work.
+    // Binary-sniffs first (NUL bytes / UTF-8 failure → REJECT regardless of extension).
+    // Then checks extension: code → REJECT; prose → ACCEPT; ambiguous → ACCEPT.
+    // FAIL CLOSED: missing script, crashed helper, or any fault causes python3 to exit
+    // nonzero, which makes the shell append CLASSIFY_REJECTED as the last line, routing
+    // to done. There is NO path from a non-accept to mine.
+    // The full actionable message (from classify_source.py stdout) appears in the node
+    // log before the routing sentinel — visible to the operator on reject.
+    classify [
+        shape=parallelogram,
+        tool_command="python3 .wiki/scripts/classify_source.py raw/$source >/tmp/wiki-classify.out 2>&1; RC=$?; cat /tmp/wiki-classify.out; if [ $RC -eq 0 ]; then echo CLASSIFY_OK; else echo CLASSIFY_REJECTED; fi"
+    ]
+    classify_gate [shape=diamond]
 
     // Step 2 — Mine the source (LLM): extract per schema, write a concrete ingest plan.
     mine [
@@ -126,8 +148,11 @@ digraph WikiIngest {
     ]
 
     start -> orient
-    orient -> mine        [condition="context.tool.last_line=ready"]
+    orient -> classify    [condition="context.tool.last_line=ready"]
     orient -> done        [condition="context.tool.last_line=uninitialized"]
+    classify -> classify_gate
+    classify_gate -> mine [condition="context.tool.last_line=CLASSIFY_OK", weight=10]
+    classify_gate -> done [condition="context.tool.last_line=CLASSIFY_REJECTED", weight=1]
     mine -> write_pages
     write_pages -> verify
     verify -> verify_gate
