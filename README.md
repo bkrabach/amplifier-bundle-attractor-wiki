@@ -1,7 +1,8 @@
 # amplifier-bundle-attractor-wiki
 
 Attractor-pipeline automation for [LLM Wikis](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
-Six wiki commands as mountable Amplifier tools, each backed by a portable `.dot` pipeline.
+Nine wiki commands (7 as mountable Amplifier tools), each backed by a portable `.dot` pipeline.
+See [CAPABILITIES.md](CAPABILITIES.md) for the authoritative list of commands, tools, and pipelines.
 
 This is the automation companion to [`amplifier-bundle-llm-wiki`](https://github.com/microsoft/amplifier-bundle-llm-wiki) — the interactive mode bundle. Both work against the same project-side wiki (`.wiki/context/schema.md` + `.wiki/scripts/`). This one runs headless.
 
@@ -9,12 +10,17 @@ This is the automation companion to [`amplifier-bundle-llm-wiki`](https://github
 
 | Tool / Command | What it does |
 |---|---|
-| `wiki_ingest` / `ingest` | Mine a source from `raw/` into the wiki (mine → write → reconcile → provenance audit → second review → verify) |
-| `wiki_query` / `query` | Read-only Q&A: index-first, cited answer written to `.wiki/query-answer.md` |
+| `wiki_ingest` / `ingest` | Ingest a source from `raw/`: classify (fail-closed input guard) → mine → write → verify → reconcile → enforce_attribution → weave → review → archive |
+| `wiki_query` / `query` | Read-only Q&A: index-first, cited answer written to `.wiki/query-answer.md`. `--save` closes the compounding loop. |
 | `wiki_lint` / `lint` | Health check: `verify.sh` + LLM suggestions → `.wiki/lint-report.md` |
 | `wiki_publish` / `publish` | Zip the wiki package via `.wiki/scripts/publish.sh` → `.wiki/dist/` |
 | `wiki_init` / `init` | Scaffold a new pure-markdown 4-type wiki from a policy brief |
 | `wiki_review` / `review` | Walk the `flag-queue.json` TODO-VERIFY queue (confirm / correct / promote) |
+| `wiki_apply_resolutions` / `apply-resolutions` | Apply queued review-queue resolutions (LLM apply + deterministic coverage gate; idempotent) |
+| — / `full-pass` | Periodic whole-wiki pass: reconcile cross-ingest duplicates, re-audit status drift, weave OLD-TO-OLD connections |
+| — / `ingest-folder` | Batch-ingest all prose files from a folder; triages and skips code/binary loudly; auto-inits target wiki |
+
+See [CAPABILITIES.md](CAPABILITIES.md) for the full authoritative enumeration of all 9 CLI commands, 10 public API functions, 7 mounted tools, and 8 `.dot` pipelines.
 
 ## Install
 
@@ -36,6 +42,9 @@ wiki-attractor lint
 wiki-attractor query "what is Team Pulse and what role does it play?"
 wiki-attractor publish
 wiki-attractor review   # walk the flag queue
+wiki-attractor full-pass   # periodic whole-wiki pass
+wiki-attractor apply-resolutions   # apply review-queue resolutions
+wiki-attractor ingest-folder ./raw-sources --target ./my-wiki   # batch ingest
 ```
 
 ## Bundle usage (AmplifierSession)
@@ -45,7 +54,7 @@ from amplifier_foundation import load_bundle
 bundle = await load_bundle("git+https://github.com/bkrabach/amplifier-bundle-attractor-wiki@main")
 prepared = await bundle.prepare()
 session = await prepared.create_session(session_cwd="/path/to/wiki")
-# Agent now has wiki_ingest, wiki_query, wiki_lint, wiki_publish, wiki_init, wiki_review tools
+# Agent now has the wiki tools mounted (see CAPABILITIES.md for the authoritative list)
 ```
 
 ## Compose as a behavior

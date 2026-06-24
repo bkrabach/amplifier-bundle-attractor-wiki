@@ -1,10 +1,10 @@
 # attractor-wiki — tools mounted
 
-You have 7 wiki automation tools:
+You have 7 wiki automation tools (see [CAPABILITIES.md](../CAPABILITIES.md) for the authoritative list):
 
 | Tool | Purpose |
 |---|---|
-| `wiki_ingest` | Mine a source from `raw/` into the wiki (mine → write_pages → verify → reconcile → provenance_audit → enforce_attribution → weave → review → verify2 → archive) |
+| `wiki_ingest` | Mine a source from `raw/` into the wiki (classify → mine → write_pages → verify → reconcile → provenance_audit → enforce_attribution → weave → review → verify2 → archive). The `classify` stage is a fail-closed input guard: rejects code/binary before any LLM work. |
 | `wiki_query` | Read-only Q&A, index-first, cited answer written to `.wiki/query-answer.md` |
 | `wiki_lint` | Read-only health check: `verify.sh` + LLM suggestions → `.wiki/lint-report.md` |
 | `wiki_publish` | Zip the wiki package via `.wiki/scripts/publish.sh` → `.wiki/dist/` |

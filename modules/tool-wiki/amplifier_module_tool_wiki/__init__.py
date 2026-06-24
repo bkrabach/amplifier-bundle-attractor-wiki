@@ -1,16 +1,17 @@
 """Amplifier tool module: wiki-attractor commands as mountable tools.
 
-Registers 6 tools — one per wiki-attractor command — that an AmplifierSession
-agent can invoke. Each tool is a thin wrapper that calls the bespoke
-wiki_attractor API (wiki_attractor.ingest, .query, .lint, etc.) and converts
-the result to a ToolResult.
+Registers 7 tools that an AmplifierSession agent can invoke. Each tool is a
+thin wrapper that calls the bespoke wiki_attractor API
+(wiki_attractor.ingest, .query, .lint, etc.) and converts the result to a
+ToolResult. See CAPABILITIES.md for the authoritative list of all 7 tools.
 
     tool.execute(input_data)
       → calls wiki_attractor.<name>(wiki_dir, ...)  (the bespoke API function)
       → returns ToolResult(success=..., output=<answer/status>)
 
-All real work lives in the .dot files (inside wiki_attractor/pipelines/).
-This module adds NO logic beyond mapping tool arguments to API calls.
+The knowledge-mining work lives in the .dot files (inside
+wiki_attractor/pipelines/). This module adds NO logic beyond mapping tool
+arguments to API calls.
 
 The Iron Law (creating-amplifier-modules skill): mount() MUST call
 coordinator.mount() for each tool, or protocol_compliance validation fails.
@@ -57,9 +58,11 @@ class WikiIngestTool:
     def description(self) -> str:
         return (
             "Ingest a source document from the wiki's raw/ inbox into the compiled wiki. "
-            "Mines the source, writes entity pages, runs reconciliation to prevent duplicates, "
-            "and verifies the result with verify.sh. Pass the filename (not the full path) "
-            "of the file already present in raw/. The wiki must be initialized first."
+            "Runs the full 11-stage pipeline: classify (fail-closed input guard — rejects "
+            "code/binary before any LLM work), mine, write_pages, verify, reconcile, "
+            "provenance_audit, enforce_attribution, weave, review, verify2, archive. "
+            "Pass the filename (not the full path) of the file already present in raw/. "
+            "The wiki must be initialized first."
         )
 
     @property

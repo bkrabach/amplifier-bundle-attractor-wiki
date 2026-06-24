@@ -2,8 +2,16 @@
 
 The `.dot` files in this directory are **portable attractor pipelines**. Each file
 is named after its command (e.g. `ingest.dot` drives `wiki-attractor ingest`). They
-are the load-bearing layer of the companion — all real work lives here, not in the
-lib or CLI wrapper.
+are the load-bearing layer of the knowledge-mining work — the full 11-stage ingest
+pipeline, the Q&A pipeline, the health-check pipeline, and the others all live here.
+
+A thin Python layer in `api.py` provides CLI/library orchestration that the attractor
+environment supplies differently: the `ingest-folder` batch meta-command (repeated
+`ingest` over a folder) and early-exit convenience wrappers. `ingest-folder` has no
+`.dot` by design.
+
+See [CAPABILITIES.md](../../CAPABILITIES.md) for the full authoritative enumeration of
+all 8 `.dot` pipelines, 9 CLI commands, and the complete ingest stage sequence.
 
 A consumer (e.g. `amplifier-resolver-dot-graph`, a custom pipeline runner, or a
 standalone script) can execute these files with nothing from `wiki_attractor` except
@@ -16,13 +24,15 @@ the dot files themselves.
 ### What travels with the dots
 
 | File | Purpose |
-|------|---------|
-| `ingest.dot`  | Mine a source → write pages → reconcile → provenance audit → verify |
+|------|---------| 
+| `ingest.dot`  | Ingest a source: classify (fail-closed input guard) → mine → write pages → verify → reconcile → provenance audit → enforce_attribution → weave → second review → verify2 → archive. Full 11-stage pipeline. |
 | `query.dot`   | Index-first Q&A; writes cited answer to `.wiki/query-answer.md` |
 | `lint.dot`    | Run `verify.sh` + LLM surface contradictions/orphans/gaps |
 | `publish.dot` | Run `.wiki/scripts/publish.sh`; zips package to `.wiki/dist/` |
 | `init.dot`    | Scaffold a new wiki; plants canonical `verify.sh` + `publish.sh` from `$ASSETS` |
 | `review.dot`  | HITL walk of `flag-queue.json` (hexagon gate; needs `$PYBIN` + `$HELPER`) |
+| `full-pass.dot` | Periodic whole-wiki global pass: reconcile cross-ingest duplicates, re-audit status drift, weave OLD-TO-OLD connections |
+| `apply-resolutions.dot` | Apply resolutions from `review-queue.json` with a deterministic coverage gate; idempotent |
 
 **Supporting artifacts referenced by the dots:**
 
@@ -31,6 +41,8 @@ the dot files themselves.
 | `.wiki/context/schema.md` | The wiki's entity schema (project-side) | Project wiki repo |
 | `.wiki/scripts/verify.sh` | Structural + provenance verifier (project-side) | Project wiki repo (or `wiki_attractor/assets/verify.sh` as canonical reference) |
 | `.wiki/scripts/publish.sh` | Package zipper (project-side) | Project wiki repo (or `wiki_attractor/assets/publish.sh`) |
+| `.wiki/scripts/classify_source.py` | Input-type guard script (planted by `init.dot`) | Project wiki repo (or `wiki_attractor/assets/classify_source.py`) |
+| `.wiki/scripts/enforce_speaker_attribution.py` | Speaker-attribution enforcer (planted by `init.dot`) | Project wiki repo |
 | `raw/<source>` / `raw/archive/` | Source inbox + archive | Project wiki repo |
 | `team-knowledge/` | The wiki package (outcomes, concepts, people, sources) | Project wiki repo |
 
@@ -45,6 +57,9 @@ the dot files themselves.
 
 ### `ingest.dot`
 - **`$source`** substituted into the DOT: the filename in `raw/` to ingest.
+- The `classify` node runs `.wiki/scripts/classify_source.py` BEFORE any LLM work.
+  It is fail-closed: if the script is missing or crashes, the pipeline routes to `done`
+  without reaching `mine`. Code/binary inputs are rejected loudly here.
 - Box (LLM) nodes need an AmplifierSession with filesystem tools (Path B) to
   actually read/write wiki files. With DirectProviderBackend they execute but
   produce degraded output (no file access).
@@ -68,8 +83,8 @@ the dot files themselves.
 ### `init.dot`
 - **`$package`** and **`$brief`** substituted.
 - **`$ASSETS`** substituted to the absolute path of the `wiki_attractor/assets/`
-  directory (contains the canonical `verify.sh` and `publish.sh`). The dot copies
-  them into the new wiki's `.wiki/scripts/`.
+  directory (contains the canonical `verify.sh`, `publish.sh`, and `classify_source.py`).
+  The dot copies them into the new wiki's `.wiki/scripts/`.
 - Runs on an **empty or new directory** (no existing wiki needed).
 
 ### `review.dot`
@@ -118,7 +133,7 @@ For LLM dots (box nodes), provide a `DirectProviderBackend` or `AmplifierSession
 ## Node-type discipline (quick reference)
 
 | Shape | Handler | LLM? | Used in these dots |
-|-------|---------|------|--------------------|
+|-------|---------|------|--------------------| 
 | `Mdiamond` | start | No | All |
 | `Msquare` | exit | No | All |
 | `parallelogram` | tool (shell) | No | ingest, publish, lint |
@@ -130,7 +145,7 @@ For LLM dots (box nodes), provide a `DirectProviderBackend` or `AmplifierSession
 
 ## Portability note
 
-These dots have **no Python imports** — they are pure DOT graphs. They reference:
+The `.dot` files themselves contain no Python imports — they are pure DOT graphs. They reference:
 - Shell commands in `tool_command` (parallelogram nodes) — these run against the
   host filesystem (the wiki repo the pipeline is pointed at).
 - Provider names in `llm_provider` attributes (box nodes) — resolved by the engine's
@@ -140,4 +155,5 @@ These dots have **no Python imports** — they are pure DOT graphs. They referen
 
 Moving a `.dot` to a different attractor runner requires: (1) providing the same
 `$placeholder` substitutions, (2) running from the wiki repo root, and (3) ensuring
-the project-side `.wiki/` files (`schema.md`, `verify.sh`, `publish.sh`) exist.
+the project-side `.wiki/` files (`schema.md`, `verify.sh`, `publish.sh`,
+`classify_source.py`) exist.
