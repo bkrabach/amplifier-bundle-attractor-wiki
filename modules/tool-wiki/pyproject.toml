@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "amplifier-module-tool-wiki"
-version = "0.1.0"
+version = "0.3.0"
 description = "Amplifier tool module: exposes the wiki tools as mountable tools in an AmplifierSession (see CAPABILITIES.md for the authoritative list)."
 requires-python = ">=3.11"
 license = { text = "MIT" }

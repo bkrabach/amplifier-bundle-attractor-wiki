@@ -1,6 +1,6 @@
 bundle:
   name: attractor-wiki-behavior
-  version: 0.1.0
+  version: 0.3.0
   description: >
     Mounts the wiki tools (wiki_ingest, wiki_query, wiki_lint, wiki_publish,
     wiki_init, wiki_review, wiki_apply_resolutions — see CAPABILITIES.md for the
