@@ -55,7 +55,7 @@ wiki_attractor/pipelines/*.dot   ← knowledge-mining work (8 portable .dot file
 
 | Consumer | How | Use when |
 |---|---|---|
-| `wiki-attractor` CLI | `uv tool install .` then `wiki-attractor ingest <source>` | Interactive or scripted local use |
+| `wiki-attractor` CLI | `uv tool install .` then `wiki-attractor ingest [source]` | Interactive or scripted local use |
 | Amplifier bundle | `load_bundle("bundle.md")` or `attractor-wiki:` bundle ref | Add wiki tools to any AmplifierSession |
 | Raw `.dot` drop-in | Copy a `.dot` from `wiki_attractor/pipelines/` | Third-party engine without this package |
 

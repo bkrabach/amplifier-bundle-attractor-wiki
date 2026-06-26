@@ -10,7 +10,7 @@ This is the automation companion to [`amplifier-bundle-llm-wiki`](https://github
 
 | Tool / Command | What it does |
 |---|---|
-| `wiki_ingest` / `ingest` | Ingest a source from `raw/`: classify (fail-closed input guard) → mine → write → verify → reconcile → enforce_attribution → weave → review → archive |
+| `wiki_ingest` / `ingest` | Ingest source file(s) from `raw/` (unified 1..N): classify (fail-closed input guard) → mine → write → verify → reconcile → enforce_attribution → weave → review → archive. `ingest <file>` (named file) or `ingest` (all of `raw/`). |
 | `wiki_query` / `query` | Read-only Q&A: index-first, cited answer written to `.wiki/query-answer.md`. `--save` closes the compounding loop. |
 | `wiki_lint` / `lint` | Health check: `verify.sh` + LLM suggestions → `.wiki/lint-report.md` |
 | `wiki_publish` / `publish` | Zip the wiki package via `.wiki/scripts/publish.sh` → `.wiki/dist/` |

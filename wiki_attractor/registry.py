@@ -61,19 +61,15 @@ class PipelineSpec:
 REGISTRY: dict[str, PipelineSpec] = {
     "ingest": PipelineSpec(
         name="ingest",
-        dot=PIPELINES_DIR / "ingest.dot",
+        dot=PIPELINES_DIR / "ingest.dot",  # unified 1..N pipeline (IS the canonical ingest)
         executor="session",
         summary=(
-            "Ingest a source from raw/ into the wiki "
-            "(mine -> write -> reconcile -> verify)."
+            "Ingest source(s) into the wiki (mine -> write -> reconcile -> weave -> verify). "
+            "ingest <FILE>: validate FILE in raw/ then process all of raw/. "
+            "ingest (no arg): process all files currently in raw/."
         ),
-        args=(
-            CliArg(
-                name="source",
-                placeholder="$source",
-                help="Filename in raw/ to ingest (e.g. 2026-06-16-call.md).",
-            ),
-        ),
+        # args=() -- SOURCE is optional; handled by bespoke _make_ingest_cli_command in cli.py.
+        args=(),
     ),
     "review": PipelineSpec(
         name="review",

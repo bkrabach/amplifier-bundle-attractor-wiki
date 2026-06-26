@@ -54,7 +54,7 @@ The Karpathy operations map directly onto our commands:
 
 | Operation | Command | What it does |
 |---|---|---|
-| **Ingest** | `ingest <source>` | **classify** (fail-closed input guard — rejects code/binary before any LLM work) → mine → write/update pages → verify → reconcile (dedup/orphan-heal) → provenance audit → **enforce_attribution** (deterministic speaker-attribution) → **weave** (new grounded connections) → second review → verify → archive. Touches many pages per source. |
+| **Ingest** | `ingest [source]` | **classify** (fail-closed input guard — rejects code/binary before any LLM work) → mine → write/update pages → verify → reconcile (dedup/orphan-heal) → provenance audit → **enforce_attribution** (deterministic speaker-attribution) → **weave** (new grounded connections) → second review → verify → archive. `ingest <file>`: named file; `ingest`: all of `raw/`. N=1 reduces cleanly (no phantom cross-refs); N>1 adds cross-source synthesis. |
 | **Lint** | `lint` | read-only health check: runs `verify.sh`, then surfaces contradictions / stale claims / orphans / concept gaps → `.wiki/lint-report.md`. |
 | **Publish** | `publish` | zips the wiki package to `.wiki/dist/` via `.wiki/scripts/publish.sh` (deterministic, no LLM). |
 | **Query** | `query <question>` | read-only, **index-first** Q&A with citations. Writes its cited answer to `.wiki/query-answer.md`; CLI/tool return it as `result["output"]`. `--save` closes the compounding loop (saves to `raw/` and ingests). |

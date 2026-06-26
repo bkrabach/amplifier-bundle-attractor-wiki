@@ -25,7 +25,7 @@ the dot files themselves.
 
 | File | Purpose |
 |------|---------| 
-| `ingest.dot`  | Ingest a source: classify (fail-closed input guard) → mine → write pages → verify → reconcile → provenance audit → enforce_attribution → weave → second review → verify2 → archive. Full 11-stage pipeline. |
+| `ingest.dot`  | Ingest source file(s) from `raw/` (unified 1..N): classify (fail-closed input guard) → mine → write pages → verify → reconcile → provenance audit → enforce_attribution → weave → second review → verify2 → archive. N=1 reduces cleanly (no phantom cross-refs); N>1 adds cross-source synthesis. No $source substitution — the pipeline reads `raw/*.md` etc. itself. Full 11-stage pipeline. |
 | `query.dot`   | Index-first Q&A; writes cited answer to `.wiki/query-answer.md` |
 | `lint.dot`    | Run `verify.sh` + LLM surface contradictions/orphans/gaps |
 | `publish.dot` | Run `.wiki/scripts/publish.sh`; zips package to `.wiki/dist/` |
@@ -52,14 +52,18 @@ the dot files themselves.
 
 ### All dots
 - **Working directory = wiki repo root** when the pipeline runs (shell commands use
-  relative paths like `raw/$source`, `.wiki/scripts/verify.sh`).
+  relative paths like `.wiki/scripts/verify.sh`). The unified ingest pipeline reads `raw/` itself (no `$source` substitution needed).
 - **`.wiki/context/schema.md`** must exist for any command except `init`.
 
 ### `ingest.dot`
-- **`$source`** substituted into the DOT: the filename in `raw/` to ingest.
-- The `classify` node runs `.wiki/scripts/classify_source.py` BEFORE any LLM work.
-  It is fail-closed: if the script is missing or crashes, the pipeline routes to `done`
-  without reaching `mine`. Code/binary inputs are rejected loudly here.
+- **No `$source` substitution.** The unified pipeline reads all files in `raw/*.md`,
+  `raw/*.txt`, `raw/*.rst` itself at runtime. No caller-side substitution needed.
+- The `classify` node runs `.wiki/scripts/classify_source.py` on EACH file found in
+  `raw/` BEFORE any LLM work.  It is fail-closed: missing script or any fault routes
+  to `done` without reaching `mine`. Code/binary inputs are rejected loudly here.
+- **N=1 vs N>1:** With one file in `raw/`, the `mine` node behaves like the old
+  single-file ingest (no phantom cross-refs). With multiple files it adds cross-source
+  synthesis.
 - Box (LLM) nodes need an AmplifierSession with filesystem tools (Path B) to
   actually read/write wiki files. With DirectProviderBackend they execute but
   produce degraded output (no file access).
@@ -150,10 +154,10 @@ The `.dot` files themselves contain no Python imports — they are pure DOT grap
   host filesystem (the wiki repo the pipeline is pointed at).
 - Provider names in `llm_provider` attributes (box nodes) — resolved by the engine's
   backend at runtime.
-- `$placeholder` tokens (e.g. `$source`, `$question`) — substituted by the caller
+- `$placeholder` tokens (e.g. `$question`, `$package`, `$brief`) — substituted by the caller
   before the engine sees the DOT text.
 
 Moving a `.dot` to a different attractor runner requires: (1) providing the same
-`$placeholder` substitutions, (2) running from the wiki repo root, and (3) ensuring
+`$placeholder` substitutions (e.g. `$question` for query.dot), (2) running from the wiki repo root, and (3) ensuring
 the project-side `.wiki/` files (`schema.md`, `verify.sh`, `publish.sh`,
 `classify_source.py`) exist.

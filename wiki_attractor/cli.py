@@ -69,7 +69,7 @@ def _print_result(name: str, result: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 _COMMAND_DISPATCH: dict[str, Any] = {
-    "ingest": lambda wd, **kw: _api.ingest(wd, kw["source"]),
+    "ingest": lambda wd, **kw: _api.ingest(wd, kw.get("source")),  # source optional in unified
     "query": lambda wd, **kw: _api.query(wd, kw["question"]),
     "lint": lambda wd, **kw: _api.lint(wd),
     "publish": lambda wd, **kw: _api.publish(wd),
@@ -471,16 +471,77 @@ def _make_ingest_folder_cli_command() -> click.Command:
     return _cmd
 
 
+
+# ---------------------------------------------------------------------------
+# Custom ingest command (bespoke: SOURCE arg is optional).
+#
+# ingest <FILE>  — validate FILE exists in raw/, then run the unified pipeline
+#                  (which picks up all of raw/, typically just that one file).
+# ingest         — run the unified pipeline on whatever is currently in raw/.
+#
+# Both paths invoke ingest-unified.dot via api.ingest().  The pipeline itself
+# handles N=1 vs N>1 reduction — with one file it behaves identically to the
+# old single-file ingest; with N files it adds batch cross-source synthesis.
+# ---------------------------------------------------------------------------
+
+
+def _make_ingest_cli_command() -> click.Command:
+    """Build the `ingest` click command with optional SOURCE argument."""
+    spec = REGISTRY["ingest"]
+
+    @click.command(
+        name="ingest",
+        help=(
+            "Ingest source file(s) from raw/ into the wiki. "
+            "\n\nWith SOURCE: validates that raw/SOURCE exists, then runs the unified "
+            "pipeline (which processes all files currently in raw/).  "
+            "\n\nWithout SOURCE: runs the unified pipeline on all files already in raw/. "
+            "\n\nAt N=1 the pipeline behaves identically to the old single-file ingest "
+            "(no phantom cross-refs). At N>1 it adds cross-source synthesis."
+        ),
+    )
+    @click.argument("source", required=False, default=None)
+    @click.pass_context
+    def _ingest_cmd(ctx: click.Context, source: str | None) -> None:
+        wiki_dir = ctx.obj["wiki_dir"]
+
+        # Pre-flight: if a specific file was named, verify it exists in raw/.
+        # This gives a clear error before the pipeline starts.
+        if source is not None:
+            src = Path(wiki_dir).resolve() / "raw" / source
+            if not src.exists():
+                raise click.ClickException(
+                    f"source not found in raw/: {source!r}"
+                )
+
+        click.echo(f"[wiki-attractor] ingest (unified): {Path(wiki_dir).resolve()}")
+        if source is not None:
+            click.echo(f"[wiki-attractor]   source = {source}")
+        else:
+            click.echo("[wiki-attractor]   source = (all files in raw/)")
+
+        try:
+            result = asyncio.run(_api.ingest(wiki_dir, source))
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        sys.exit(_print_result(spec.name.upper(), result))
+
+    return _ingest_cmd
+
 # Register every pipeline as a command.
 # `query` is skipped here — it needs --save/--no-save support and uses a
 # custom builder below.  All other commands are fully auto-generated.
 for _spec in REGISTRY.values():
-    if _spec.name == "query":
-        continue
+    if _spec.name in ("query", "ingest"):
+        continue  # query and ingest use bespoke CLI builders below
     main.add_command(_BUILDERS[_spec.executor](_spec))
 
 # Register the query command with --save/--no-save support (compounding loop).
 main.add_command(_make_query_cli_command())
+
+# Register the ingest command with optional SOURCE arg (unified 1..N pipeline).
+main.add_command(_make_ingest_cli_command())
 
 # Register the ingest-folder batch command (orchestrates multiple pipeline runs).
 main.add_command(_make_ingest_folder_cli_command())

@@ -1,4 +1,4 @@
-// wiki-ingest pipeline — the attractor re-expression of /wiki-ingest.
+// wiki-ingest-unified pipeline — generalized 1..N batch; N=1 reduces cleanly to single-file behavior.
 //
 // Runs under the wiki-agent-anthropic child profile. The LOAD-BEARING schema/scripts
 // are project-side in .wiki/ and reached by the box nodes' filesystem tools.
@@ -34,10 +34,10 @@
 
 digraph WikiIngest {
     graph [
-        goal="Ingest the source named in $source into the wiki per .wiki/context/schema.md",
+        goal="Batch-ingest all source files currently in raw/ into the wiki per .wiki/context/schema.md",
         default_max_retry=3,
         default_fidelity="full",
-        default_thread_id="wiki-ingest"
+        default_thread_id="wiki-ingest-unified"
     ]
 
     start [shape=Mdiamond]
@@ -60,25 +60,21 @@ digraph WikiIngest {
     // log before the routing sentinel — visible to the operator on reject.
     classify [
         shape=parallelogram,
-        tool_command="python3 .wiki/scripts/classify_source.py raw/$source >/tmp/wiki-classify.out 2>&1; RC=$?; cat /tmp/wiki-classify.out; if [ $RC -eq 0 ]; then echo CLASSIFY_OK; else echo CLASSIFY_REJECTED; fi"
+        tool_command="STATUS=0; FOUND=0; for f in raw/*.md raw/*.txt raw/*.rst; do [ -f \"$f\" ] || continue; FOUND=1; python3 .wiki/scripts/classify_source.py \"$f\" >/tmp/wiki-classify-batch.out 2>&1; RC=$?; cat /tmp/wiki-classify-batch.out; [ $RC -ne 0 ] && { echo \"BATCH_REJECT: $f\"; STATUS=1; }; done; [ $FOUND -eq 0 ] && { echo 'BATCH_REJECT: no source files found in raw/'; STATUS=1; }; [ $STATUS -eq 0 ] && echo CLASSIFY_OK || echo CLASSIFY_REJECTED"
     ]
     classify_gate [shape=diamond]
 
     // Step 2 — Mine the source (LLM): extract per schema, write a concrete ingest plan.
     mine [
         llm_provider="anthropic",
-        prompt="You are running /wiki-ingest as an automated pipeline (no interactive mode, no human in the loop). The load-bearing contract is .wiki/context/schema.md; your mounted orientation explains the pattern to read it through. Read raw/$source, mine it per the schema (entities, concepts, decisions, cross-refs), and WRITE a concrete ingest plan to .wiki/ingest-plan.md naming every page to create or update with the specific edits and the source citations. IMPORTANT: first read the EXISTING pages under team-knowledge/ (outcomes, concepts, people, sources) and reuse an existing entity page when the source refers to the same thing under a different name — do not invent a new slug for an entity that already exists. 
-
-SETTLED-WRITE-LOCK (non-negotiable): Before writing the ingest plan, for each existing page the source would touch, read its frontmatter and check the status field. If ANY page has status: settled AND the new source contradicts or reverses that page's primary load-bearing claim: (1) DO NOT plan to overwrite or replace the settled claim — it is write-locked against silent overwrite; (2) PRESERVE the original settled claim verbatim in the page body; (3) ADD an explicit READER-VISIBLE tension entry to team-knowledge/open-questions.md under the ## Tensions or ## Contradictions section — NOT a hidden HTML comment — naming both the settled claim (with its source slug and date) and the contradicting claim (with its source slug and date); (4) DOWNGRADE the page status from settled to working in the plan — a contested claim is no longer settled; (5) NEVER silently relabel the new content as settled. If the source agrees with the settled claim, no lock applies. This rule applies even when the new source is dated later — settled status is a human-confirmed write lock, not a timestamp race. Auto-resolving a settled conflict internally without surfacing it is a pipeline faithfulness failure.
-
-Do not write wiki pages yet. End with a one-line summary; your final message MUST be non-empty plain text."
+        prompt="You are running /wiki-ingest as an automated pipeline (no interactive mode, no human in the loop). The load-bearing contract is .wiki/context/schema.md; your mounted orientation explains the pattern to read it through.\n\nBATCH MODE: Read ALL source files currently in raw/ (list them with: ls raw/*.md raw/*.txt 2>/dev/null — every file except those under raw/archive/). Read each one fully.\n\nSINGLE VS MULTIPLE SOURCES: Count how many source files are present in raw/ before proceeding.\n- If exactly ONE source file is present: mine it exactly as you would in a standard single-file ingest — extract entities, concepts, decisions, and cross-refs from that one source. Do NOT fabricate self-contradictions, phantom cross-references, or spurious cross-source agreements/disagreements. There is only one source; act accordingly.\n- If MULTIPLE sources are present: mine all sources COLLECTIVELY and ALSO actively look for cross-source agreements and contradictions — e.g. two sources both mentioning the same person/outcome, or conflicting claims about a decision. Capture these genuine cross-source relationships in the ingest-plan.\n\nMine the source(s) per the schema (entities, concepts, decisions, cross-refs from ALL sources). IMPORTANT: first read the EXISTING pages under team-knowledge/ (outcomes, concepts, people, sources) and reuse an existing entity page when the source refers to the same thing under a different name — do not invent a new slug for an entity that already exists.\n\nSETTLED-WRITE-LOCK (non-negotiable): Before writing the ingest plan, for each existing page the source would touch, read its frontmatter and check the status field. If ANY page has status: settled AND the new source contradicts or reverses that page's primary load-bearing claim: (1) DO NOT plan to overwrite or replace the settled claim — it is write-locked against silent overwrite; (2) PRESERVE the original settled claim verbatim in the page body; (3) ADD an explicit READER-VISIBLE tension entry to team-knowledge/open-questions.md under the ## Tensions or ## Contradictions section — NOT a hidden HTML comment — naming both the settled claim (with its source slug and date) and the contradicting claim (with its source slug and date); (4) DOWNGRADE the page status from settled to working in the plan — a contested claim is no longer settled; (5) NEVER silently relabel the new content as settled. If the source agrees with the settled claim, no lock applies. This rule applies even when the new source is dated later — settled status is a human-confirmed write lock, not a timestamp race. Auto-resolving a settled conflict internally without surfacing it is a pipeline faithfulness failure.\n\nWrite ONE unified ingest-plan to .wiki/ingest-plan.md covering ALL pages to create or update across the entire batch. For each page: name every specific edit AND list which source file(s) the content comes from (so write_pages can cite each source correctly — sources[] on each page should list ONLY the sources that actually contributed content to THAT page, not all batch sources). Each source file in raw/ gets its own sources/ page.\n\nDo not write wiki pages yet. End with a one-line summary; your final message MUST be non-empty plain text."
     ]
 
     // Step 3 — Apply the plan (LLM): create/edit pages, update index + log, cite.
     // No goal_gate: the deterministic verify.sh loop below IS the real gate.
     write_pages [
         llm_provider="anthropic",
-        prompt="Apply .wiki/ingest-plan.md against the wiki package: create/edit each page following the schema's frontmatter + body conventions, wire [[wikilinks]] and sources[], update index.md, and append one line to log.md. Cite every claim to a source page. Honor the status discipline (settled / working / unsettled; proposals are NOT decisions; never fabricate).\\n\\nSPEAKER RESOLUTION TABLES: When creating a sources/ page for a transcript that uses anonymous @N speaker handles (e.g. @1, @2, @3), include a SPEAKER_RESOLUTION_TABLE HTML comment block immediately after the call metadata section. One row per handle:\\n<!-- SPEAKER_RESOLUTION_TABLE\\n@N | Person Name | named|inferred|unresolved | brief basis\\nEND_SPEAKER_RESOLUTION_TABLE -->\\nStatus values: named = explicit name in transcript speaker label; inferred = identified by content-matching (conservative default for @N de-anonymization); unresolved = cannot reliably identify. Use 'inferred' even for high-confidence content matches — it is still inference, not confirmation.\\n\\nEnd with a non-empty one-line summary of what changed."
+        prompt="Apply .wiki/ingest-plan.md against the wiki package: create/edit each page following the schema's frontmatter + body conventions, wire [[wikilinks]] and sources[], update index.md, and append one line to log.md. Cite every claim to a source page. Honor the status discipline (settled / working / unsettled; proposals are NOT decisions; never fabricate).\\n\\nBATCH NOTE: the ingest-plan covers one or more source files. Each page's sources[] MUST cite only the source(s) that actually contributed content to THAT page — not all batch sources. The plan specifies which source(s) go with which page; follow it faithfully.\\n\\nSPEAKER RESOLUTION TABLES: When creating a sources/ page for a transcript that uses anonymous @N speaker handles (e.g. @1, @2, @3), include a SPEAKER_RESOLUTION_TABLE HTML comment block immediately after the call metadata section. One row per handle:\\n<!-- SPEAKER_RESOLUTION_TABLE\\n@N | Person Name | named|inferred|unresolved | brief basis\\nEND_SPEAKER_RESOLUTION_TABLE -->\\nStatus values: named = explicit name in transcript speaker label; inferred = identified by content-matching (conservative default for @N de-anonymization); unresolved = cannot reliably identify. Use 'inferred' even for high-confidence content matches — it is still inference, not confirmation.\\n\\nEnd with a non-empty one-line summary of what changed."
     ]
 
     // Step 4 — Verify the per-source write (deterministic). Route on exit code + sentinel.
@@ -160,7 +156,7 @@ Do not write wiki pages yet. End with a one-line summary; your final message MUS
     // Step 10 — Archive the ingested source (deterministic).
     archive [
         shape=parallelogram,
-        tool_command="mkdir -p raw/archive && mv raw/$source raw/archive/ && printf archived"
+        tool_command="mkdir -p raw/archive && ARCHIVED=0; for f in raw/*.md raw/*.txt raw/*.rst; do [ -f \"$f\" ] && mv \"$f\" raw/archive/ && ARCHIVED=$((ARCHIVED+1)); done; printf 'archived %d file(s)' $ARCHIVED"
     ]
 
     start -> orient
