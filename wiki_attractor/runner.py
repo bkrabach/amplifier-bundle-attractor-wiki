@@ -71,10 +71,11 @@ def _register_spawn_capability(session: Any, prepared: Any) -> None:
     # Memoize resolved child bundles by ref string — one load per unique ref per
     # run_pipeline call. Avoids repeated round-trips to the foundation registry
     # for the same profile file across all box nodes in one pipeline run.
-    # The single-bundle-ref branch ("bundle" key, len==1) is the hot path: our
+    # The bundle-ref branch ("bundle" key present) is the hot path: our
     # wiki-agent profile is the same on every node, so MISS happens only once;
     # subsequent nodes get HIT from this per-run cache.
-    # The multi-key Bundle(...) construction path is left unchanged.
+    # Extra keys (e.g. session.orchestrator for the recursion-guard) are
+    # intentionally ignored here — the loaded bundle file already declares them.
     _bundle_cache: dict[str, Any] = {}
 
     async def spawn_capability(
@@ -97,7 +98,7 @@ def _register_spawn_capability(session: Any, prepared: Any) -> None:
             available = list(agent_configs.keys()) + list(prepared.bundle.agents.keys())
             raise ValueError(f"Agent '{agent_name}' not found. Available: {available}")
 
-        if "bundle" in config and len(config) == 1:
+        if "bundle" in config:
             ref = config["bundle"]
             # Rewrite 'attractor:' namespace refs to resolvable git URLs.
             if ref.startswith("attractor:"):
@@ -156,7 +157,7 @@ async def _run_session_pipeline(
                 "config": {"profiles": PROFILES_MAP, "dot_source": dot_text},
             }
         },
-        agents={"attractor-agent-anthropic": {"bundle": str(agent_profile)}},
+        agents={"attractor-agent-anthropic": {"bundle": str(agent_profile), "session": {"orchestrator": {"module": "loop-agent"}}}},
     )
     composed = bundle.compose(overlay)
     prepared = await composed.prepare()
