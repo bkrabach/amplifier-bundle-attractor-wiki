@@ -12,7 +12,7 @@ Registered via `wiki_attractor/registry.py` + `wiki_attractor/cli.py`.
 
 | Command | Summary |
 |---|---|
-| `ingest <source>` | Ingest a source from `raw/` into the wiki through the full 11-stage pipeline (classify → … → archive). |
+| `ingest [source]` | Ingest source file(s) from `raw/` through the unified 1..N pipeline (classify → … → archive). With `source`: validates that `raw/source` exists, then processes all files in `raw/`. Without `source`: processes all files currently in `raw/`. N=1 behaves identically to the old single-file ingest; N>1 adds cross-source synthesis. |
 | `query <question>` | Read-only Q&A: index-first drill, cited answer written to `.wiki/query-answer.md`. `--save` closes the compounding loop (saves answer to `raw/` and ingests it). |
 | `lint` | Read-only health check: `verify.sh` + LLM surfaces contradictions/stale/orphans → `.wiki/lint-report.md`. |
 | `publish` | Zip the wiki package via `.wiki/scripts/publish.sh` → `.wiki/dist/`. |
@@ -40,7 +40,7 @@ The `tool-wiki` Amplifier module (`modules/tool-wiki/amplifier_module_tool_wiki/
 
 | Tool | Purpose |
 |---|---|
-| `wiki_ingest` | Ingest a source document from `raw/` into the compiled wiki (full pipeline). |
+| `wiki_ingest` | Ingest source file(s) from `raw/` into the compiled wiki (unified 1..N pipeline). Optional `source` arg: names a specific file; omit to process all files in `raw/`. |
 | `wiki_query` | Read-only Q&A against the compiled wiki (index-first, cited answer). |
 | `wiki_lint` | Read-only health check: `verify.sh` + surface issues → lint report. |
 | `wiki_publish` | Publish the wiki package (zip to `.wiki/dist/`). |
@@ -49,7 +49,7 @@ The `tool-wiki` Amplifier module (`modules/tool-wiki/amplifier_module_tool_wiki/
 | `wiki_apply_resolutions` | Apply resolutions from `review-queue.json` with a semantic coverage gate; idempotent. |
 
 All tools require `wiki_dir` (absolute path to an initialized wiki repo root).
-`wiki_ingest` also requires `source` (filename in `raw/`).
+`wiki_ingest` accepts an optional `source` (filename in `raw/`; if omitted, all files in `raw/` are ingested).
 `wiki_query` also requires `question`.
 
 ---

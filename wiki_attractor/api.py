@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -194,30 +195,36 @@ def _prepare_init_dir(wiki_dir: str | Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-async def ingest(wiki_dir: str | Path, source: str) -> dict[str, Any]:
-    """Ingest a source file from raw/ into the wiki.
+async def ingest(wiki_dir: str | Path, source: str | None = None) -> dict[str, Any]:
+    """Ingest source file(s) from raw/ into the wiki (unified 1..N pipeline).
 
-    Mines the source, writes entity pages, reconciles duplicates, runs a
-    provenance audit + second-LLM review, and verifies with verify.sh.
-    ``source`` is the bare filename in raw/ (e.g. ``2026-06-20-call.md``).
+    With ``source``: validates that raw/<source> exists (pre-flight), then runs
+    the unified pipeline which processes ALL files in raw/ (N=1 at this point).
+    Without ``source``: runs the unified pipeline on whatever is already in raw/.
+
+    The unified pipeline:
+      - N=1  -> mines the single file normally (no phantom cross-refs)
+      - N>1  -> mines all files collectively, surfaces cross-source agreements/contradictions
 
     Returns the pipeline result dict.  ``result["status"] == "success"`` on a
     clean run.
 
     Raises ValueError if:
       - wiki_dir is not an initialized wiki, OR
-      - the source file is binary (null bytes / non-UTF-8), OR
-      - the source file has a source-code extension.
+      - source is given and the file is binary / has a source-code extension.
 
-    The input-type check runs BEFORE any LLM work so code/binary input can
-    never silently produce garbage entity pages.
+    The input-type check (when source is given) runs BEFORE any LLM work.
     """
     wiki_dir = _check_wiki(wiki_dir)
-    # FAIL-LOUD guard: reject code/binary before any LLM mining starts.
-    _classify_source(wiki_dir, source)
+    if source is not None:
+        # FAIL-LOUD guard: reject code/binary before any LLM mining starts.
+        _classify_source(wiki_dir, source)
     spec = REGISTRY["ingest"]
-    subs = {"$source": source}
-    return await run_pipeline(spec.dot, wiki_dir, subs=subs)
+    # Clear any stale checkpoint so the unified pipeline always starts fresh.
+    # The checkpoint dir is /tmp/attractor-pipeline/ (a directory, not a single file).
+    shutil.rmtree(_CHECKPOINT_PATH.parent, ignore_errors=True)
+    # The unified pipeline reads all of raw/ itself; no $source substitution needed.
+    return await run_pipeline(spec.dot, wiki_dir)
 
 
 async def query(wiki_dir: str | Path, question: str) -> dict[str, Any]:
